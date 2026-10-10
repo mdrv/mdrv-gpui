@@ -29,7 +29,7 @@ See [MDRV.md](MDRV.md) for the full log. Highlights:
 
 ```toml
 [dependencies]
-gpui = { package = "mdrv-gpui", git = "https://github.com/mdrv/mdrv-gpui", tag = "mdrv-gpui-0.270.0", default-features = false }
+gpui = { package = "mdrv-gpui", git = "https://github.com/mdrv/mdrv-gpui", tag = "mdrv-gpui-0.270.1", default-features = false }
 ```
 
 The apps that pin it run it daily on Linux, Android and wasm.

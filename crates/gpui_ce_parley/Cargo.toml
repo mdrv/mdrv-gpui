@@ -17,7 +17,7 @@ fontconfig-dlopen = ["fontique/fontconfig-dlopen"]
 [dependencies]
 anyhow.workspace = true
 fontique = { workspace = true, features = ["std"] }
-gpui = { path = "../gpui", version = "0.270.0", package = "mdrv-gpui", default-features = false }
+gpui = { path = "../gpui", version = "0.270.1", package = "mdrv-gpui", default-features = false }
 parking_lot.workspace = true
 parley = { workspace = true, features = ["complex-scripts"] }
 skrifa = { workspace = true, features = ["std"] }

@@ -10,7 +10,7 @@ Crate `mdrv-gpui` (lib name stays `gpui`); platform crates prefixed
 February 2027, and the patch number bumps within a month. October to
 December is the exception: the whole quarter shares one number, so
 `0.270.0` is Oct-Dec 2026 and `0.280.0` is Oct-Dec 2027. Tags are
-`mdrv-gpui-<version>`, e.g. `mdrv-gpui-0.270.0`.
+`mdrv-gpui-<version>`, e.g. `mdrv-gpui-0.270.1`.
 
 ## Consuming the fork
 
@@ -24,8 +24,8 @@ Git tags for everything else (nothing is published to crates.io; consumers
 pin a tag):
 
     [dependencies]
-    gpui = { package = "mdrv-gpui", git = "https://github.com/mdrv/mdrv-gpui", tag = "mdrv-gpui-0.270.0" }
-    gpui_platform = { package = "mdrv-gpui-platform", git = "https://github.com/mdrv/mdrv-gpui", tag = "mdrv-gpui-0.270.0", features = ["wayland"] }
+    gpui = { package = "mdrv-gpui", git = "https://github.com/mdrv/mdrv-gpui", tag = "mdrv-gpui-0.270.1" }
+    gpui_platform = { package = "mdrv-gpui-platform", git = "https://github.com/mdrv/mdrv-gpui", tag = "mdrv-gpui-0.270.1", features = ["wayland"] }
 
     [patch.crates-io]
     arrayref = { git = "https://github.com/mdrv/mdrv-gpui" }
@@ -253,7 +253,7 @@ byte-exactly (texel centers at [191, 0, 0] ±2, interior brightest
 asserts are now structural (sampled + opacity-capped) and the
 brightest floor is 110 — the opacity cap itself is unchanged.
 
-#### Render-scale knob + scene-space fragment coordinates (shipped in `mdrv-gpui-0.270.0`)
+#### Render-scale knob + scene-space fragment coordinates (shipped in `mdrv-gpui-0.270.1`)
 
 `WgpuRenderer::set_render_scale(f)` (0.25..=1.0; atomic in `settings.rs`)
 renders the surface at `scale × logical size` while `scene_size` keeps the
@@ -389,9 +389,9 @@ Full sync procedure: `/x/m/v270/gpui-ce/50-upstream-sync.md`.
   protocol).
 - `mdrv-gpui-mobile` + the Ely component showcase
   (`mdrv-gpui-ely/showcase`) — path-dep, Android + wasm.
-- `mdrv-lab`, `mdrv-example` — git tag `mdrv-gpui-0.270.0` plus local
+- `mdrv-lab`, `mdrv-example` — git tag `mdrv-gpui-0.270.1` plus local
   `[patch]` tables pointing at this working tree.
-- `mdrv-em` (emoji picker) — git tag `mdrv-gpui-0.270.0`.
+- `mdrv-em` (emoji picker) — git tag `mdrv-gpui-0.270.1`.
 - `suemo` (released v0.1.0) — git tag `mdrv-gpui-0.0.260925.5`, left
   pinned.
 - `impin` (image pins; branch `cross-platform`, v0.2.0) — git tag

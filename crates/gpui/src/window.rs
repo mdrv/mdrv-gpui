@@ -2255,6 +2255,22 @@ impl Window {
         self.platform_window.set_exclusive_edge(edge);
     }
 
+    /// Linux (wayland layer-shell) only: change this window's keyboard
+    /// interactivity at runtime (see [`layer_shell::KeyboardInteractivity`]).
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    pub fn set_keyboard_interactivity(&self, mode: crate::layer_shell::KeyboardInteractivity) {
+        self.platform_window.set_keyboard_interactivity(mode);
+    }
+
+    /// Linux (wayland layer-shell) only: change this window's layer-surface
+    /// margins at runtime, CSS order (top, right, bottom, left). On a surface
+    /// with no anchors this is effectively its position. No-op on other
+    /// platforms/backends.
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    pub fn set_margin(&self, margin: (Pixels, Pixels, Pixels, Pixels)) {
+        self.platform_window.set_margin(margin);
+    }
+
     /// Start an interactive window resize operation if this window is resizable.
     pub fn start_window_resize(&self, edge: ResizeEdge) {
         if self.is_resizable {
@@ -2572,6 +2588,14 @@ impl Window {
     /// Set the content size of the window.
     pub fn resize(&mut self, size: Size<Pixels>) {
         self.platform_window.resize(size);
+    }
+
+    /// Move the window so that its top-left corner lands at `origin`
+    /// (global screen coordinates, top-left of the primary display, y
+    /// pointing down — the same space as `App::displays()` bounds).
+    /// No-op on platforms that cannot reposition windows programmatically.
+    pub fn set_position(&self, origin: Point<Pixels>) {
+        self.platform_window.set_position(origin);
     }
 
     /// Returns whether or not the window is currently fullscreen
@@ -3674,10 +3698,11 @@ impl Window {
 
     /// Updates the cursor style for the entire window at the platform level. A cursor
     /// style using this method will have precedence over any cursor style set using
-    /// `set_cursor_style`. This method should only be called during the paint
-    /// phase of element drawing.
+    /// `set_cursor_style`. This method may be called during the prepaint phase
+    /// (where views render, e.g. from `Render::render`) or the paint phase;
+    /// the request is stored on the pending frame either way.
     pub fn set_window_cursor_style(&mut self, style: CursorStyle) {
-        self.invalidator.debug_assert_paint();
+        self.invalidator.debug_assert_paint_or_prepaint();
         self.next_frame.cursor_styles.push(CursorStyleRequest {
             hitbox_id: None,
             style,
@@ -6000,6 +6025,27 @@ impl Window {
         }
 
         self.finish_dispatch_key_event(event, dispatch_path, match_result.context_stack, cx);
+
+        // Android soft keyboards (and other platforms without a real IME
+        // channel) deliver printable characters as plain KeyDown events with
+        // `prefer_character_input`. If the event propagated unhandled and a
+        // focused input handler accepts text, insert the character there so
+        // standard gpui text inputs receive it. Platforms WITH an IME bridge
+        // (macOS, web) never set prefer_character_input, and apps with custom
+        // text machinery don't register input handlers, so this is inert for
+        // both.
+        if cx.propagate_event
+            && let Some(key_down) = event.downcast_ref::<KeyDownEvent>()
+            && key_down.prefer_character_input
+            && let Some(input) = key_down.keystroke.key_char.clone()
+            && let Some(mut input_handler) = self.platform_window.take_input_handler()
+        {
+            if input_handler.query_accepts_text_input() {
+                input_handler.dispatch_input(&input, self, cx);
+            }
+            self.platform_window.set_input_handler(input_handler);
+        }
+
         self.pending_input_changed(cx);
     }
 
@@ -6657,7 +6703,12 @@ impl Window {
     /// Returns backend-specific typed GPU context information for custom
     /// controls. Use the rendering backend's context type to downcast the
     /// returned value.
-    #[cfg(any(target_family = "wasm", target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(
+        target_family = "wasm",
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "android"
+    ))]
     pub fn gpu_context_info(&self) -> Option<Box<dyn std::any::Any>> {
         self.platform_window.gpu_context_info()
     }

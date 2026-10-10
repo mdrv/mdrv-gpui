@@ -40,18 +40,22 @@ pub(crate) type PlatformScreenCaptureFrame = core_video::image_buffer::CVImageBu
 // yields no platform sources there.
 pub(crate) type PlatformScreenCaptureFrame = ();
 
+use crate::util::FluentBuilder;
 use crate::{
     Action, AnyWindowHandle, App, AsyncWindowContext, BackgroundExecutor, Bounds,
     DEFAULT_WINDOW_SIZE, DevicePixels, DispatchEventResult, Edges, ExternalDragPayload, Font,
-    FontId, FontMetrics, FontRun, ForegroundExecutor, GlyphId, GpuSpecs, ImageSource, Keymap,
-    LineLayout, Pixels, PlatformGestures, PlatformInput, Point, Priority, RenderGlyphParams,
-    RenderImage, RenderImageParams, RenderSvgParams, Scene, ShapedGlyph, ShapedRun, SharedString,
-    Size, SvgRenderer, SystemWindowTab, Task, Window, WindowControlArea, hash, point, px, size,
+    FontId, FontMetrics, ForegroundExecutor, GlyphAtlasEntry, GlyphId, GpuSpecs, ImageSource,
+    InlineLayout, InlineLayoutRequest, Keymap, LineLayout, Pixels, PlatformGestures, PlatformInput,
+    Point, PreparedRasterStyle, Priority, RasterStyleRequest, RasterizedGlyph,
+    RasterizedGlyphFormat, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams,
+    Scene, SharedString, Size, SvgRenderer, SystemWindowTab, Task, TextLayoutRequest,
+    ValidatedRasterizedGlyph, Window, WindowControlArea, hash, point, px,
 };
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use anyhow::bail;
 use anyhow::{Context as _, Result};
 use async_task::Runnable;
+use collections::FxHashMap;
 use futures::channel::oneshot;
 #[cfg(any(test, feature = "test-support", feature = "bench-support"))]
 use image::RgbaImage;
@@ -89,6 +93,9 @@ pub(crate) use test::*;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use test::{TestDispatcher, TestScreenCaptureSource, TestScreenCaptureStream};
+
+#[cfg(any(test, feature = "test-support"))]
+pub use tests::TestTextSystem;
 
 #[cfg(any(test, feature = "test-support", feature = "bench-support"))]
 pub use threaded_dispatcher::ThreadedDispatcher;
@@ -956,7 +963,13 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     }
     #[cfg(target_os = "macos")]
     fn set_traffic_light_position(&self, _position: Point<Pixels>) {}
-    fn show_character_palette(&self) {}
+    /// Show the platform character palette.
+    ///
+    /// The default implementation logs a warning when the backend does not
+    /// support showing a character palette.
+    fn show_character_palette(&self) {
+        log::warn!("show_character_palette is not implemented by this platform backend");
+    }
     fn titlebar_double_click(&self, _is_resizable: bool, _is_minimizable: bool) {}
     fn on_move_tab_to_new_window(&self, _callback: Box<dyn FnMut()>) {}
     fn on_merge_all_windows(&self, _callback: Box<dyn FnMut()>) {}
@@ -1014,7 +1027,12 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
 
     /// Returns the GPU context for this window's renderer.
     /// The returned `Box` contains `(Arc<wgpu::Device>, Arc<wgpu::Queue>)`.
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "windows",
+        target_os = "macos"
+    ))]
     fn gpu_context(&self) -> Option<Box<dyn std::any::Any>> {
         None
     }
@@ -1026,7 +1044,8 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
         target_family = "wasm",
         target_os = "linux",
         target_os = "freebsd",
-        target_os = "android"
+        target_os = "android",
+        target_os = "macos"
     ))]
     fn gpu_context_info(&self) -> Option<Box<dyn std::any::Any>> {
         None
@@ -1038,7 +1057,12 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     /// captured the device from `gpu_context` should stop submitting while
     /// this is `Some(true)` and re-acquire the device once it reads
     /// `Some(false)` again.
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "windows",
+        target_os = "macos"
+    ))]
     fn gpu_device_lost(&self) -> Option<bool> {
         None
     }
@@ -1187,6 +1211,10 @@ pub trait PlatformTextSystem: Send + Sync {
     fn add_fonts(&self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()>;
     /// Get all available font names.
     fn all_font_names(&self) -> Vec<String>;
+    /// Generation of the font collection used by layout cache invalidation.
+    fn font_generation(&self) -> u64 {
+        0
+    }
     /// Get the font ID for a font descriptor.
     fn font_id(&self, descriptor: &Font) -> Result<FontId>;
     /// Prewarm any system font caches needed to shape text.
@@ -1199,166 +1227,599 @@ pub trait PlatformTextSystem: Send + Sync {
     fn advance(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Size<f32>>;
     /// Get the glyph ID for a character.
     fn glyph_for_char(&self, font_id: FontId, ch: char) -> Option<GlyphId>;
-    /// Get raster bounds for a glyph.
-    fn glyph_raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>>;
-    /// Rasterize a glyph.
-    fn rasterize_glyph(
-        &self,
-        params: &RenderGlyphParams,
-        raster_bounds: Bounds<DevicePixels>,
-    ) -> Result<(Size<DevicePixels>, Vec<u8>)>;
-    /// Layout a line of text with the given font runs.
-    fn layout_line(&self, text: &str, font_size: Pixels, runs: &[FontRun]) -> LineLayout;
+    /// Rasterize a glyph, including its atlas placement and pixels.
+    fn rasterize_glyph(&self, params: &RenderGlyphParams) -> Result<RasterizedGlyph>;
+    /// Normalizes the render settings that affect cached glyph pixels.
+    fn prepare_raster_style(&self, request: RasterStyleRequest) -> PreparedRasterStyle {
+        PreparedRasterStyle::independent(request.requested_mode)
+    }
+    /// Layout one complete text document, including hard breaks and optional wrapping.
+    fn layout_text(&self, request: TextLayoutRequest<'_>) -> LineLayout;
+    /// Layout one complete text document containing atomic element boxes.
+    fn layout_inline(&self, request: InlineLayoutRequest<'_>) -> InlineLayout;
     /// Returns the recommended text rendering mode for the given font and size.
-    fn recommended_rendering_mode(&self, _font_id: FontId, _font_size: Pixels)
-    -> TextRenderingMode;
-    /// Returns the dilation level to use for a glyph painted in the given color.
-    fn glyph_dilation_for_color(&self, _color: palette::Hsla) -> u8 {
-        0
-    }
-}
-
-#[expect(missing_docs)]
-pub struct NoopTextSystem;
-
-#[expect(missing_docs)]
-impl NoopTextSystem {
-    #[allow(dead_code)]
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl PlatformTextSystem for NoopTextSystem {
-    fn add_fonts(&self, _fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
-        Ok(())
-    }
-
-    fn all_font_names(&self) -> Vec<String> {
-        Vec::new()
-    }
-
-    fn font_id(&self, _descriptor: &Font) -> Result<FontId> {
-        Ok(FontId(1))
-    }
-
-    fn font_metrics(&self, _font_id: FontId) -> FontMetrics {
-        FontMetrics {
-            units_per_em: 1000,
-            ascent: 1025.0,
-            descent: -275.0,
-            line_gap: 0.0,
-            underline_position: -95.0,
-            underline_thickness: 60.0,
-            cap_height: 698.0,
-            x_height: 516.0,
-            bounding_box: Bounds {
-                origin: Point {
-                    x: -260.0,
-                    y: -245.0,
-                },
-                size: Size {
-                    width: 1501.0,
-                    height: 1364.0,
-                },
-            },
-        }
-    }
-
-    fn typographic_bounds(&self, _font_id: FontId, _glyph_id: GlyphId) -> Result<Bounds<f32>> {
-        Ok(Bounds {
-            origin: Point { x: 54.0, y: 0.0 },
-            size: size(392.0, 528.0),
-        })
-    }
-
-    fn advance(&self, _font_id: FontId, glyph_id: GlyphId) -> Result<Size<f32>> {
-        Ok(size(600.0 * glyph_id.0 as f32, 0.0))
-    }
-
-    fn glyph_for_char(&self, _font_id: FontId, ch: char) -> Option<GlyphId> {
-        Some(GlyphId(ch.len_utf16() as u32))
-    }
-
-    fn glyph_raster_bounds(&self, _params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
-        Ok(Default::default())
-    }
-
-    fn rasterize_glyph(
-        &self,
-        _params: &RenderGlyphParams,
-        raster_bounds: Bounds<DevicePixels>,
-    ) -> Result<(Size<DevicePixels>, Vec<u8>)> {
-        Ok((raster_bounds.size, Vec::new()))
-    }
-
-    fn layout_line(&self, text: &str, font_size: Pixels, font_runs: &[FontRun]) -> LineLayout {
-        let mut position = px(0.);
-        let metrics = self.font_metrics(FontId(0));
-        let em_width = font_size
-            * self
-                .advance(FontId(0), self.glyph_for_char(FontId(0), 'm').unwrap())
-                .unwrap()
-                .width
-            / metrics.units_per_em as f32;
-        let mut glyphs = Vec::new();
-        for (ix, c) in text.char_indices() {
-            if let Some(glyph) = self.glyph_for_char(FontId(0), c) {
-                glyphs.push(ShapedGlyph {
-                    id: glyph,
-                    position: point(position, px(0.)),
-                    index: ix,
-                    is_emoji: glyph.0 == 2,
-                });
-                if glyph.0 == 2 {
-                    position += em_width * 2.0;
-                } else {
-                    position += em_width;
-                }
-            } else {
-                position += em_width
-            }
-        }
-        let mut shaped_runs = Vec::default();
-        if !glyphs.is_empty() {
-            shaped_runs.push(ShapedRun {
-                font_id: FontId(0),
-                glyphs,
-            });
-        } else {
-            position = px(0.);
-        }
-
-        let mut tracking = px(0.);
-        let mut byte_offset = 0usize;
-        for run in font_runs {
-            let end = byte_offset.saturating_add(run.len).min(text.len());
-            let slice = text.get(byte_offset..end).unwrap_or("");
-            let n = slice.chars().count();
-            if n > 1 {
-                if let Some(spacing) = run.letter_spacing {
-                    tracking += spacing * (n - 1) as f32;
-                }
-            }
-            byte_offset = byte_offset.saturating_add(run.len);
-        }
-
-        LineLayout {
-            font_size,
-            width: position + tracking,
-            ascent: font_size * (metrics.ascent / metrics.units_per_em as f32),
-            descent: font_size * (metrics.descent / metrics.units_per_em as f32),
-            runs: shaped_runs,
-            len: text.len(),
-        }
-    }
-
     fn recommended_rendering_mode(
         &self,
         _font_id: FontId,
         _font_size: Pixels,
     ) -> TextRenderingMode {
-        TextRenderingMode::Grayscale
+        TextRenderingMode::Subpixel
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+mod tests {
+    use crate::{
+        Bounds, CaretAffinity, CaretMovement, CaretPosition, Font, FontId, FontMetrics, GlyphId,
+        InlineLayout, InlineLayoutRequest, InlineVisualLine, LineLayout, PaintFragment, PaintStyle,
+        Pixels, PlatformTextLayout, PlatformTextSystem, Point, PositionedInlineBox,
+        RasterizedGlyph, RasterizedGlyphFormat, RenderGlyphParams, ResolvedDirection, ShapedGlyph,
+        Size, TextAlign, TextBoundary, TextDirection, TextLayoutRequest, TextMovement,
+        TextRenderingMode, TextSelectionKind, VisualDirection, VisualLine, align_inline_boxes,
+        point, px, size,
+    };
+    use anyhow::Result;
+    use std::{borrow::Cow, ops::Range, sync::Arc};
+
+    #[expect(missing_docs)]
+    pub struct TestTextSystem;
+
+    #[derive(Debug)]
+    /// A deterministic test layout with exactly one visual and hard line.
+    struct TestPlatformTextLayout {
+        /// Source text.
+        text: String,
+        /// Ordered (byte index, x position) caret stops.
+        stops: Vec<(usize, Pixels)>,
+        /// Size of the single visual line.
+        size: Size<Pixels>,
+    }
+
+    impl TestPlatformTextLayout {
+        fn caret_stop(&self, byte_offset: usize) -> (usize, Pixels) {
+            let stop_index = self
+                .stops
+                .partition_point(|(index, _position)| *index <= byte_offset)
+                .saturating_sub(1);
+
+            self.stops[stop_index]
+        }
+    }
+
+    impl PlatformTextLayout for TestPlatformTextLayout {
+        fn len(&self) -> usize {
+            self.stops.last().map_or(0, |(index, _)| *index)
+        }
+
+        fn line_count(&self) -> usize {
+            // This test layout deliberately reports its single visual line.
+            1
+        }
+
+        fn size(&self) -> Size<Pixels> {
+            self.size
+        }
+
+        fn byte_index_from_pixel_point(
+            &self,
+            pixel_point: Point<Pixels>,
+            line_height: Pixels,
+        ) -> Result<usize, usize> {
+            let closest = self
+                .caret_from_pixel_point(pixel_point, line_height)
+                .unwrap_or_else(|caret| caret)
+                .index;
+            self.stops
+                .windows(2)
+                .find_map(|stops| {
+                    let [(start_index, start_x), (_end_index, end_x)] = stops else {
+                        return None;
+                    };
+
+                    (pixel_point.x >= *start_x && pixel_point.x < *end_x)
+                        .then_some(Ok(*start_index))
+                })
+                .unwrap_or(Err(closest))
+        }
+
+        fn caret_from_pixel_point(
+            &self,
+            pixel_point: Point<Pixels>,
+            line_height: Pixels,
+        ) -> Result<CaretPosition, CaretPosition> {
+            let index = self
+                .stops
+                .iter()
+                .min_by(|(_, left), (_, right)| {
+                    (f32::from(*left) - f32::from(pixel_point.x))
+                        .abs()
+                        .total_cmp(&(f32::from(*right) - f32::from(pixel_point.x)).abs())
+                })
+                .map_or(0, |(index, _)| *index);
+            let caret = self.normalized_caret(CaretPosition {
+                index,
+                affinity: CaretAffinity::Downstream,
+            });
+
+            if pixel_point.y >= Pixels::ZERO
+                && pixel_point.y < line_height
+                && pixel_point.x >= Pixels::ZERO
+                && pixel_point.x < self.size.width
+            {
+                Ok(caret)
+            } else {
+                Err(caret)
+            }
+        }
+
+        fn caret_bounds(
+            &self,
+            caret: CaretPosition,
+            line_height: Pixels,
+        ) -> Option<Bounds<Pixels>> {
+            let caret = self.normalized_caret(caret);
+            let (_index, position) = self.caret_stop(caret.index);
+
+            Some(Bounds::new(
+                point(position, Pixels::ZERO),
+                size(Pixels::ZERO, line_height),
+            ))
+        }
+
+        fn normalized_caret(&self, caret: CaretPosition) -> CaretPosition {
+            let (index, _position) = self.caret_stop(caret.index);
+            let affinity = if index == self.len() && index != 0 {
+                CaretAffinity::Upstream
+            } else {
+                caret.affinity
+            };
+
+            CaretPosition { index, affinity }
+        }
+
+        fn adjacent_visual_caret(
+            &self,
+            caret: CaretPosition,
+            direction: VisualDirection,
+        ) -> Option<CaretPosition> {
+            let caret = self.normalized_caret(caret);
+            let position = self
+                .stops
+                .iter()
+                .position(|(index, _)| *index == caret.index)?;
+            let position = match direction {
+                VisualDirection::Left => position.checked_sub(1)?,
+                VisualDirection::Right => position.checked_add(1)?,
+            };
+
+            let index = self.stops.get(position)?.0;
+            Some(self.normalized_caret(CaretPosition {
+                index,
+                affinity: CaretAffinity::Downstream,
+            }))
+        }
+
+        fn selection_bounds(
+            &self,
+            byte_range: Range<usize>,
+            line_height: Pixels,
+        ) -> Vec<Bounds<Pixels>> {
+            if byte_range.is_empty() {
+                return Vec::new();
+            }
+
+            let (_start_index, start) = self.caret_stop(byte_range.start);
+            let (_end_index, end) = self.caret_stop(byte_range.end);
+
+            // The platform contract returns one bound per visual line. Since this test
+            // layout has exactly one visual line, every non-empty selection has one bound.
+            vec![Bounds::from_corners(
+                point(start.min(end), Pixels::ZERO),
+                point(start.max(end), line_height),
+            )]
+        }
+
+        fn logical_cluster_before(&self, caret: CaretPosition) -> Option<Range<usize>> {
+            self.stops
+                .windows(2)
+                .rev()
+                .find(|stops| stops[1].0 <= caret.index)
+                .map(|stops| stops[0].0..stops[1].0)
+        }
+
+        fn logical_cluster_after(&self, caret: CaretPosition) -> Option<Range<usize>> {
+            self.stops
+                .windows(2)
+                .find(|stops| stops[0].0 >= caret.index)
+                .map(|stops| stops[0].0..stops[1].0)
+        }
+
+        fn caret_movement(
+            &self,
+            caret: CaretPosition,
+            movement: TextMovement,
+            vertical_navigation_x: Option<Pixels>,
+        ) -> CaretMovement {
+            use TextBoundary::*;
+            use TextDirection::*;
+
+            let index = match (movement.direction, movement.boundary) {
+                (Left, Cluster) => {
+                    self.adjacent_visual_caret(caret, VisualDirection::Left)
+                        .unwrap_or(caret)
+                        .index
+                }
+                (Right, Cluster) => {
+                    self.adjacent_visual_caret(caret, VisualDirection::Right)
+                        .unwrap_or(caret)
+                        .index
+                }
+                (Left, Word) => {
+                    let prefix = &self.text[..caret.index.min(self.text.len())];
+                    let trimmed = prefix.trim_end_matches(char::is_whitespace);
+                    trimmed.rfind(char::is_whitespace).map_or(0, |index| {
+                        index + trimmed[index..].chars().next().unwrap().len_utf8()
+                    })
+                }
+                (Right, Word) => {
+                    let start = caret.index.min(self.text.len());
+                    let suffix = &self.text[start..];
+                    let word_end = suffix.find(char::is_whitespace).unwrap_or(suffix.len());
+                    let rest = &suffix[word_end..];
+                    start
+                        + word_end
+                        + rest
+                            .find(|character: char| !character.is_whitespace())
+                            .unwrap_or(rest.len())
+                }
+                // This test layout has one visual and hard line. Without wrapping or
+                // additional hard lines, these movements resolve to the document endpoints.
+                (Up | Start, VisualLine) | (Start, HardLine | Document) => 0,
+                (Down | End, VisualLine) | (End, HardLine | Document) => self.len(),
+                _ => caret.index,
+            };
+
+            let vertical_navigation_x =
+                matches!(movement.direction, TextDirection::Up | TextDirection::Down).then(|| {
+                    vertical_navigation_x.unwrap_or_else(|| {
+                        self.caret_bounds(caret, self.size.height)
+                            .map_or(Pixels::ZERO, |bounds| bounds.origin.x)
+                    })
+                });
+
+            CaretMovement {
+                result: self.normalized_caret(CaretPosition {
+                    index,
+                    affinity: CaretAffinity::Downstream,
+                }),
+                vertical_navigation_x,
+            }
+        }
+
+        fn selection_from_pixel_point(
+            &self,
+            pixel_point: Point<Pixels>,
+            line_height: Pixels,
+            kind: TextSelectionKind,
+        ) -> Range<usize> {
+            if !matches!(kind, TextSelectionKind::Word) {
+                return 0..self.len();
+            }
+
+            let index = self
+                .caret_from_pixel_point(pixel_point, line_height)
+                .unwrap_or_else(|caret| caret)
+                .index
+                .min(self.text.len());
+            let start = self.text[..index]
+                .rfind(char::is_whitespace)
+                .map_or(0, |offset| {
+                    offset + self.text[offset..].chars().next().unwrap().len_utf8()
+                });
+            let end = self.text[index..]
+                .find(char::is_whitespace)
+                .map_or(self.text.len(), |offset| index + offset);
+            start..end
+        }
+    }
+
+    #[expect(missing_docs)]
+    impl TestTextSystem {
+        #[allow(dead_code)]
+        pub fn new() -> Self {
+            Self
+        }
+
+        fn em_width(&self, font_size: Pixels) -> Pixels {
+            let metrics = self.font_metrics(FontId(0));
+            let advance = self
+                .advance(FontId(0), self.glyph_for_char(FontId(0), 'm').unwrap())
+                .unwrap();
+
+            font_size * advance.width / metrics.units_per_em as f32
+        }
+    }
+
+    fn position_test_inline_boxes(
+        request: InlineLayoutRequest<'_>,
+        em_width: Pixels,
+        baseline: Pixels,
+    ) -> Vec<PositionedInlineBox> {
+        let mut preceding_width = Pixels::ZERO;
+        request
+            .boxes
+            .iter()
+            .map(|inline_box| {
+                let text_width = em_width
+                    * request.text[..inline_box.index]
+                        .chars()
+                        .map(|character| character.len_utf16() as f32)
+                        .sum::<f32>();
+                let positioned = PositionedInlineBox {
+                    id: inline_box.id,
+                    line_index: 0,
+                    bounds: Bounds::new(
+                        point(
+                            text_width + preceding_width,
+                            baseline - inline_box.size.height,
+                        ),
+                        inline_box.size,
+                    ),
+                };
+
+                preceding_width += inline_box.size.width;
+                positioned
+            })
+            .collect()
+    }
+
+    fn add_test_inline_box_advances(layout: &mut LineLayout, request: InlineLayoutRequest<'_>) {
+        for fragment in &mut layout.paint_fragments {
+            // This layout owns its freshly built glyphs. If they become shared,
+            // make_mut copies the slice before changing their positions.
+            for (glyph, (index, _)) in Arc::make_mut(&mut fragment.glyphs)
+                .iter_mut()
+                .zip(request.text.char_indices())
+            {
+                glyph.position.x += request
+                    .boxes
+                    .iter()
+                    .filter(|inline_box| inline_box.index <= index)
+                    .map(|inline_box| inline_box.size.width)
+                    .sum::<Pixels>();
+            }
+        }
+
+        let box_width = request
+            .boxes
+            .iter()
+            .map(|inline_box| inline_box.size.width)
+            .sum::<Pixels>();
+        for fragment in &mut layout.paint_fragments {
+            fragment.x_range.end += box_width;
+        }
+
+        layout.width += box_width;
+
+        if let Some(line) = layout.visual_lines.first_mut() {
+            line.advance_width += box_width;
+        }
+    }
+
+    impl PlatformTextSystem for TestTextSystem {
+        fn add_fonts(&self, _fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
+            Ok(())
+        }
+
+        fn all_font_names(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn font_id(&self, _descriptor: &Font) -> Result<FontId> {
+            Ok(FontId(1))
+        }
+
+        fn font_metrics(&self, _font_id: FontId) -> FontMetrics {
+            FontMetrics {
+                units_per_em: 1000,
+                ascent: 1025.0,
+                descent: -275.0,
+                line_gap: 0.0,
+                underline_position: -95.0,
+                underline_thickness: 60.0,
+                cap_height: 698.0,
+                x_height: 516.0,
+                bounding_box: Bounds {
+                    origin: Point {
+                        x: -260.0,
+                        y: -245.0,
+                    },
+                    size: Size {
+                        width: 1501.0,
+                        height: 1364.0,
+                    },
+                },
+            }
+        }
+
+        fn typographic_bounds(&self, _font_id: FontId, _glyph_id: GlyphId) -> Result<Bounds<f32>> {
+            Ok(Bounds {
+                origin: Point { x: 54.0, y: 0.0 },
+                size: size(392.0, 528.0),
+            })
+        }
+
+        fn advance(&self, _font_id: FontId, glyph_id: GlyphId) -> Result<Size<f32>> {
+            Ok(size(600.0 * glyph_id.0 as f32, 0.0))
+        }
+
+        fn glyph_for_char(&self, _font_id: FontId, ch: char) -> Option<GlyphId> {
+            Some(GlyphId(ch.len_utf16() as u32))
+        }
+
+        fn rasterize_glyph(&self, _params: &RenderGlyphParams) -> Result<RasterizedGlyph> {
+            Ok(RasterizedGlyph {
+                bounds: Default::default(),
+                size: Default::default(),
+                format: RasterizedGlyphFormat::AlphaMask,
+                pixels: Vec::new(),
+            })
+        }
+
+        fn layout_text(&self, request: TextLayoutRequest<'_>) -> LineLayout {
+            let text = request.text;
+            let font_size = request.font_size;
+            let shaping_runs = request.runs;
+            let mut position = px(0.);
+            let metrics = self.font_metrics(FontId(0));
+            let em_width = self.em_width(font_size);
+            let mut glyphs = Vec::new();
+            let mut stops = vec![(0, Pixels::ZERO)];
+
+            for (idx, character) in text.char_indices() {
+                let glyph_id = GlyphId(character.len_utf16() as u32);
+                glyphs.push(ShapedGlyph {
+                    id: glyph_id,
+                    position: point(position, Pixels::ZERO),
+                    is_emoji: glyph_id.0 == 2,
+                });
+
+                position += em_width * glyph_id.0 as f32;
+                stops.push((idx + character.len_utf8(), position));
+            }
+
+            let mut tracking = px(0.);
+            let mut tracking_covered = 0usize;
+            for run in shaping_runs {
+                let start = tracking_covered.min(text.len());
+                let end = start.saturating_add(run.len).min(text.len()).max(start);
+                let slice = text.get(start..end).unwrap_or("");
+                let n = slice.chars().count();
+                if n > 1 {
+                    if let Some(spacing) = run.letter_spacing {
+                        tracking += spacing * (n - 1) as f32;
+                    }
+                }
+                tracking_covered = end;
+            }
+
+            let direction = match request.options.direction {
+                crate::ParagraphDirection::LeftToRight => ResolvedDirection::LeftToRight,
+                crate::ParagraphDirection::RightToLeft => ResolvedDirection::RightToLeft,
+                crate::ParagraphDirection::Auto => {
+                    ResolvedDirection::from_first_strong(text).unwrap_or_default()
+                }
+            };
+            let advance = position + tracking;
+            let alignment_width = request.options.alignment_width.unwrap_or(advance);
+            let offset = match request.options.text_align {
+                TextAlign::Start if direction.is_rtl() => alignment_width - advance,
+                TextAlign::Start | TextAlign::Left => Pixels::ZERO,
+                TextAlign::Center => (alignment_width - advance) / 2.0,
+                TextAlign::End if direction.is_rtl() => Pixels::ZERO,
+                TextAlign::End | TextAlign::Right => alignment_width - advance,
+            };
+
+            for (_idx, position) in &mut stops {
+                *position += offset;
+            }
+
+            let visual_lines = [VisualLine {
+                text_range: 0..text.len(),
+                paint_fragment_range: 0..usize::from(!glyphs.is_empty()),
+                advance_width: advance,
+                offset,
+                direction,
+            }]
+            .into_iter()
+            .collect();
+            let paint_fragments = (!glyphs.is_empty())
+                .then(|| PaintFragment {
+                    source_run: 0,
+                    font_id: FontId(0),
+                    font_size,
+                    glyphs: glyphs.into(),
+                    x_range: Pixels::ZERO..advance,
+                    style: shaping_runs
+                        .first()
+                        .map_or_else(PaintStyle::default, PaintStyle::from),
+                    underline_offset: Some(font_size * 0.1),
+                    strikethrough_offset: Some(-font_size * 0.3),
+                })
+                .into_iter()
+                .collect();
+            LineLayout {
+                font_size,
+                width: advance,
+                ascent: font_size * (metrics.ascent / metrics.units_per_em as f32),
+                descent: font_size * (metrics.descent / metrics.units_per_em as f32),
+                visual_lines,
+                paint_fragments,
+                len: text.len(),
+                platform_layout: Arc::new(TestPlatformTextLayout {
+                    text: text.to_owned(),
+                    stops,
+                    size: size(advance, font_size),
+                }),
+            }
+        }
+
+        fn layout_inline(&self, request: InlineLayoutRequest<'_>) -> InlineLayout {
+            let mut layout = self.layout_text(TextLayoutRequest {
+                text: request.text,
+                font_size: request.font_size,
+                runs: request.runs,
+                options: request.options,
+            });
+
+            let em_width = self.em_width(request.font_size);
+            let baseline = request
+                .boxes
+                .iter()
+                .map(|inline_box| inline_box.size.height)
+                .fold(request.line_height, Pixels::max);
+            let positioned_boxes = position_test_inline_boxes(request, em_width, baseline);
+            add_test_inline_box_advances(&mut layout, request);
+            let line_width = request
+                .options
+                .wrap_width
+                .unwrap_or(Pixels::MAX)
+                .min(layout.width);
+            let line_offset = layout.visual_lines[0].offset;
+            let mut inline = InlineLayout {
+                size: size(layout.width, baseline),
+                layout: Arc::new(layout),
+                lines: [InlineVisualLine {
+                    origin: point(line_offset, Pixels::ZERO),
+                    size: size(line_width, baseline),
+                    baseline,
+                }]
+                .into_iter()
+                .collect(),
+                boxes: positioned_boxes,
+                alignment_offset: Pixels::ZERO,
+            };
+
+            align_inline_boxes(
+                &mut inline.lines,
+                &mut inline.boxes,
+                &mut inline.size,
+                request.boxes,
+                &[request.text_metrics],
+                &[],
+                request.text_metrics,
+                request.line_height,
+            );
+            inline
+        }
+
+        fn recommended_rendering_mode(
+            &self,
+            _font_id: FontId,
+            _font_size: Pixels,
+        ) -> TextRenderingMode {
+            TextRenderingMode::Grayscale
+        }
     }
 }
 
@@ -1401,7 +1862,10 @@ pub fn get_gamma_correction_ratios(gamma: f32) -> [f32; 4] {
 #[derive(PartialEq, Eq, Hash, Clone)]
 #[expect(missing_docs)]
 pub enum AtlasKey {
-    Glyph(RenderGlyphParams),
+    Glyph {
+        params: RenderGlyphParams,
+        format: RasterizedGlyphFormat,
+    },
     Svg(RenderSvgParams),
     Image(RenderImageParams),
 }
@@ -1417,24 +1881,20 @@ impl AtlasKey {
     /// Returns the texture kind for this atlas key.
     pub fn texture_kind(&self) -> AtlasTextureKind {
         match self {
-            AtlasKey::Glyph(params) => {
-                if params.is_emoji {
-                    AtlasTextureKind::Polychrome
-                } else if params.subpixel_rendering {
-                    AtlasTextureKind::Subpixel
-                } else {
-                    AtlasTextureKind::Monochrome
-                }
-            }
+            AtlasKey::Glyph { format, .. } => match format {
+                RasterizedGlyphFormat::AlphaMask => AtlasTextureKind::Monochrome,
+                RasterizedGlyphFormat::BgraSubpixelMask => AtlasTextureKind::Subpixel,
+                RasterizedGlyphFormat::BgraColor => AtlasTextureKind::Polychrome,
+            },
             AtlasKey::Svg(_) => AtlasTextureKind::Monochrome,
             AtlasKey::Image(_) => AtlasTextureKind::Polychrome,
         }
     }
 }
 
-impl From<RenderGlyphParams> for AtlasKey {
-    fn from(params: RenderGlyphParams) -> Self {
-        Self::Glyph(params)
+impl From<(RenderGlyphParams, RasterizedGlyphFormat)> for AtlasKey {
+    fn from((params, format): (RenderGlyphParams, RasterizedGlyphFormat)) -> Self {
+        Self::Glyph { params, format }
     }
 }
 
@@ -1450,6 +1910,52 @@ impl From<RenderImageParams> for AtlasKey {
     }
 }
 
+#[doc(hidden)]
+#[derive(Default)]
+pub struct GlyphAtlasCache {
+    entries: FxHashMap<RenderGlyphParams, GlyphAtlasEntry>,
+}
+
+impl GlyphAtlasCache {
+    pub fn get(&self, params: &RenderGlyphParams) -> Option<GlyphAtlasEntry> {
+        self.entries.get(params).copied()
+    }
+
+    pub fn insert(
+        &mut self,
+        params: &RenderGlyphParams,
+        glyph: &RasterizedGlyph,
+        tile: Option<AtlasTile>,
+    ) -> GlyphAtlasEntry {
+        let entry = GlyphAtlasEntry {
+            tile,
+            bounds: glyph.bounds,
+            format: glyph.format,
+        };
+        self.entries.insert(params.clone(), entry);
+
+        entry
+    }
+
+    pub fn remove(&mut self, key: &AtlasKey) {
+        let AtlasKey::Glyph { params, format } = key else {
+            return;
+        };
+
+        if self
+            .entries
+            .get(params)
+            .is_some_and(|entry| entry.format == *format)
+        {
+            self.entries.remove(params);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
+
 #[expect(missing_docs)]
 pub trait PlatformAtlas {
     fn get_or_insert_with<'a>(
@@ -1457,6 +1963,12 @@ pub trait PlatformAtlas {
         key: &AtlasKey,
         build: &mut dyn FnMut() -> Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
     ) -> Result<Option<AtlasTile>>;
+    /// On a cache miss, `build` returns a validated glyph for atlas insertion.
+    fn get_or_insert_glyph_with(
+        &self,
+        params: &RenderGlyphParams,
+        build: &mut dyn FnMut() -> Result<ValidatedRasterizedGlyph>,
+    ) -> Result<GlyphAtlasEntry>;
     fn remove(&self, key: &AtlasKey);
 
     #[cfg(any(test, feature = "test-support", feature = "bench-support"))]
@@ -2091,8 +2603,25 @@ pub enum TextInputAction {
     Send,
 }
 
-/// The variables that can be configured when creating a new window
-#[derive(Debug)]
+/// Options for creating a window.
+///
+/// Chain setters on [`WindowOptions::default`] (or [`WindowOptions::new`]) to
+/// override individual fields. Optional setters accept a value or an `Option`.
+/// Pass `None` to clear the field.
+///
+/// The window background is configured per platform, so consumers explicitly
+/// decide what each target needs:
+///
+/// ```
+/// use gpui::WindowOptions;
+///
+/// let options = WindowOptions::new()
+///     .focus(false)
+///     .titlebar(None)
+///     .app_id("org.example.app".to_owned());
+/// ```
+#[derive(Debug, derive_setters::Setters)]
+#[setters(into)]
 pub struct WindowOptions {
     /// Specifies the state and bounds of the window in screen coordinates.
     /// - `None`: Inherit the bounds.
@@ -2144,8 +2673,21 @@ pub struct WindowOptions {
     /// the window will be created on the main display
     pub display_id: Option<DisplayId>,
 
-    /// The appearance of the window background.
-    pub window_background: WindowBackgroundAppearance,
+    /// The background appearance of a macOS window.
+    #[cfg(target_os = "macos")]
+    pub macos_window_background: MacosWindowBackground,
+
+    /// The background appearance of a Windows window.
+    #[cfg(target_os = "windows")]
+    pub windows_window_background: WindowsWindowBackground,
+
+    /// The background appearance of a Linux window.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    pub linux_window_background: LinuxWindowBackground,
+
+    /// The background appearance of a web window.
+    #[cfg(target_family = "wasm")]
+    pub web_window_background: WebWindowBackground,
 
     /// Application identifier of the window. Can by used by desktop environments to group applications together.
     pub app_id: Option<String>,
@@ -2163,6 +2705,8 @@ pub struct WindowOptions {
     /// Tab group name, allows opening the window as a native tab on macOS 10.12+. Windows with the same tabbing identifier will be grouped together.
     pub tabbing_identifier: Option<String>,
 }
+
+impl FluentBuilder for WindowOptions {}
 
 /// The variables that can be configured when creating a new window
 #[derive(Debug)]
@@ -2283,7 +2827,14 @@ impl Default for WindowOptions {
             is_resizable: true,
             is_minimizable: true,
             display_id: None,
-            window_background: WindowBackgroundAppearance::default(),
+            #[cfg(target_os = "macos")]
+            macos_window_background: MacosWindowBackground::default(),
+            #[cfg(target_os = "windows")]
+            windows_window_background: WindowsWindowBackground::default(),
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            linux_window_background: LinuxWindowBackground::default(),
+            #[cfg(target_family = "wasm")]
+            web_window_background: WebWindowBackground::default(),
             icon: None,
             app_id: None,
             window_min_size: None,
@@ -2293,8 +2844,59 @@ impl Default for WindowOptions {
     }
 }
 
-/// The options that can be configured for a window's titlebar
-#[derive(Debug, Default)]
+impl WindowOptions {
+    /// Returns window options with the platform's defaults: a focused, shown,
+    /// resizable, minimizable, movable normal window with a titlebar.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns the window's background appearance for the current platform,
+    /// erased into the renderer-facing [`WindowBackgroundAppearance`].
+    pub fn background_appearance(&self) -> WindowBackgroundAppearance {
+        #[cfg(target_os = "macos")]
+        {
+            self.macos_window_background.into()
+        }
+        #[cfg(target_os = "windows")]
+        {
+            self.windows_window_background.into()
+        }
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        {
+            self.linux_window_background.into()
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            self.web_window_background.into()
+        }
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "windows",
+            any(target_os = "linux", target_os = "freebsd"),
+            target_family = "wasm",
+        )))]
+        {
+            WindowBackgroundAppearance::default()
+        }
+    }
+}
+
+/// Options for a window's titlebar.
+///
+/// Chain setters on [`TitlebarOptions::default`] and pass the result to
+/// [`WindowOptions::titlebar()`]. Pass `None` to clear the title or traffic light position.
+///
+/// ```
+/// use gpui::{SharedString, TitlebarOptions, point, px};
+///
+/// let titlebar = TitlebarOptions::default()
+///     .title(SharedString::from("My app"))
+///     .appears_transparent(true)
+///     .traffic_light_position(point(px(16.0), px(16.0)));
+/// ```
+#[derive(Debug, Default, derive_setters::Setters)]
+#[setters(into)]
 pub struct TitlebarOptions {
     /// The initial title of the window
     pub title: Option<SharedString>,
@@ -2306,6 +2908,8 @@ pub struct TitlebarOptions {
     /// The position of the macOS traffic light buttons
     pub traffic_light_position: Option<Point<Pixels>>,
 }
+
+impl FluentBuilder for TitlebarOptions {}
 
 /// The kind of window to create
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2368,6 +2972,10 @@ pub enum WindowAppearance {
 
 /// The appearance of the background of the window itself, when there is
 /// no content or the content is transparent.
+///
+/// The variants available depend on the target platform. In particular,
+/// the Mica backdrop materials are only supported on Windows 11 and are
+/// ignored elsewhere.
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub enum WindowBackgroundAppearance {
     /// Opaque.
@@ -2389,6 +2997,201 @@ pub enum WindowBackgroundAppearance {
     MicaBackdrop,
     /// The Mica Alt backdrop material, supported on Windows 11.
     MicaAltBackdrop,
+}
+
+impl WindowBackgroundAppearance {
+    /// Whether the window's background hides everything behind the window,
+    /// letting the platform skip compositing the content it covers.
+    pub fn is_opaque(&self) -> bool {
+        matches!(self, Self::Opaque)
+    }
+
+    /// Whether the window's background lets content behind the window show
+    /// through, either directly, blurred, or via a system backdrop material.
+    pub fn is_transparent(&self) -> bool {
+        !self.is_opaque()
+    }
+}
+
+#[cfg(test)]
+mod window_background_appearance_tests {
+    use super::WindowBackgroundAppearance;
+
+    #[test]
+    fn only_opaque_hides_the_content_behind_the_window() {
+        assert!(WindowBackgroundAppearance::Opaque.is_opaque());
+        assert!(!WindowBackgroundAppearance::Opaque.is_transparent());
+
+        for appearance in [
+            WindowBackgroundAppearance::Transparent,
+            WindowBackgroundAppearance::Blurred,
+            WindowBackgroundAppearance::MicaBackdrop,
+            WindowBackgroundAppearance::MicaAltBackdrop,
+        ] {
+            assert!(appearance.is_transparent());
+            assert!(!appearance.is_opaque());
+        }
+    }
+}
+
+/// The background appearance of a macOS window, set through
+/// [`WindowOptions::macos_window_background`].
+#[cfg(target_os = "macos")]
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub enum MacosWindowBackground {
+    /// Hides everything behind the window. Themes should define a fully
+    /// opaque background color instead of relying on the system's.
+    #[default]
+    Opaque,
+    /// Plain alpha transparency.
+    Transparent,
+    /// Transparency with the contents behind the window blurred, via the
+    /// system's vibrancy materials.
+    Blurred,
+}
+
+/// The background appearance of a Windows window, set through
+/// [`WindowOptions::windows_window_background`].
+#[cfg(target_os = "windows")]
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub enum WindowsWindowBackground {
+    /// Hides everything behind the window. Themes should define a fully
+    /// opaque background color instead of relying on the system's.
+    #[default]
+    Opaque,
+    /// Plain alpha transparency.
+    Transparent,
+    /// Transparency with the contents behind the window blurred.
+    Blurred,
+    /// The Mica backdrop material, supported on Windows 11.
+    MicaBackdrop,
+    /// The Mica Alt backdrop material, supported on Windows 11.
+    MicaAltBackdrop,
+}
+
+/// The background appearance of a Linux window, set through
+/// [`WindowOptions::linux_window_background`]. Whether blurring is honored
+/// depends on the compositor; X11 treats it as plain transparency.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub enum LinuxWindowBackground {
+    /// Hides everything behind the window. Themes should define a fully
+    /// opaque background color instead of relying on the system's.
+    #[default]
+    Opaque,
+    /// Plain alpha transparency.
+    Transparent,
+    /// Transparency with the contents behind the window blurred, when the
+    /// compositor supports it.
+    Blurred,
+}
+
+/// The background appearance of a web window, set through
+/// [`WindowOptions::web_window_background`]. Web windows are always opaque at
+/// the platform level.
+#[cfg(target_family = "wasm")]
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub enum WebWindowBackground {
+    /// The window background is always opaque.
+    #[default]
+    Opaque,
+}
+
+#[cfg(target_os = "macos")]
+impl From<MacosWindowBackground> for WindowBackgroundAppearance {
+    fn from(background: MacosWindowBackground) -> Self {
+        match background {
+            MacosWindowBackground::Opaque => Self::Opaque,
+            MacosWindowBackground::Transparent => Self::Transparent,
+            MacosWindowBackground::Blurred => Self::Blurred,
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl From<WindowsWindowBackground> for WindowBackgroundAppearance {
+    fn from(background: WindowsWindowBackground) -> Self {
+        match background {
+            WindowsWindowBackground::Opaque => Self::Opaque,
+            WindowsWindowBackground::Transparent => Self::Transparent,
+            WindowsWindowBackground::Blurred => Self::Blurred,
+            WindowsWindowBackground::MicaBackdrop => Self::MicaBackdrop,
+            WindowsWindowBackground::MicaAltBackdrop => Self::MicaAltBackdrop,
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+impl From<LinuxWindowBackground> for WindowBackgroundAppearance {
+    fn from(background: LinuxWindowBackground) -> Self {
+        match background {
+            LinuxWindowBackground::Opaque => Self::Opaque,
+            LinuxWindowBackground::Transparent => Self::Transparent,
+            LinuxWindowBackground::Blurred => Self::Blurred,
+        }
+    }
+}
+
+#[cfg(target_family = "wasm")]
+impl From<WebWindowBackground> for WindowBackgroundAppearance {
+    fn from(background: WebWindowBackground) -> Self {
+        match background {
+            WebWindowBackground::Opaque => Self::Opaque,
+        }
+    }
+}
+
+#[cfg(test)]
+mod platform_window_background_tests {
+    use super::WindowBackgroundAppearance;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_backgrounds_map_to_appearances() {
+        use super::MacosWindowBackground;
+        assert_eq!(
+            WindowBackgroundAppearance::from(MacosWindowBackground::Opaque),
+            WindowBackgroundAppearance::Opaque
+        );
+        assert_eq!(
+            WindowBackgroundAppearance::from(MacosWindowBackground::Blurred),
+            WindowBackgroundAppearance::Blurred
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_backgrounds_map_to_appearances() {
+        use super::WindowsWindowBackground;
+        assert_eq!(
+            WindowBackgroundAppearance::from(WindowsWindowBackground::MicaAltBackdrop),
+            WindowBackgroundAppearance::MicaAltBackdrop
+        );
+        assert_eq!(
+            WindowBackgroundAppearance::from(WindowsWindowBackground::default()),
+            WindowBackgroundAppearance::Opaque
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[test]
+    fn linux_backgrounds_map_to_appearances() {
+        use super::LinuxWindowBackground;
+        assert_eq!(
+            WindowBackgroundAppearance::from(LinuxWindowBackground::Transparent),
+            WindowBackgroundAppearance::Transparent
+        );
+    }
+
+    #[cfg(target_family = "wasm")]
+    #[test]
+    fn web_backgrounds_map_to_appearances() {
+        use super::WebWindowBackground;
+        assert_eq!(
+            WindowBackgroundAppearance::from(WebWindowBackground::Opaque),
+            WindowBackgroundAppearance::Opaque
+        );
+    }
 }
 
 /// The text rendering mode to use for drawing glyphs.
@@ -3041,7 +3844,7 @@ impl From<String> for ClipboardString {
 
 #[cfg(test)]
 mod image_tests {
-    use crate::AssetRegistry;
+    use crate::{AssetRegistry, size};
 
     use super::*;
     use std::sync::Arc;
@@ -3086,7 +3889,7 @@ mod image_tests {
 }
 
 #[cfg(all(test, any(target_os = "linux", target_os = "freebsd")))]
-mod tests {
+mod window_button_layout_tests {
     use super::*;
     use std::collections::HashSet;
 

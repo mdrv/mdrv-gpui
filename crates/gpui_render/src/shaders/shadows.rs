@@ -10,7 +10,7 @@ pub mod shadow {
         pub blur_radius: f32,
         pub bounds: Bounds,
         pub corner_radii: Corners,
-        pub content_mask: Bounds,
+        pub content_mask: ContentMask,
         pub color: Background,
         pub element_bounds: Bounds,
         pub element_corner_radii: Corners,
@@ -180,7 +180,7 @@ pub mod shadow {
             position: vertex.clip_position,
             paint: prepare_paint(shadow_paint(shadow)),
             shadow_id: instance_id,
-            clip_distances: clip_distances(vertex.viewport_position, shadow.content_mask),
+            clip_distances: clip_distances(vertex.viewport_position, shadow.content_mask.bounds),
         }
     }
 
@@ -236,7 +236,11 @@ pub mod shadow {
             scene_position,
             PreparedPaint::new(input.paint_solid, input.paint_color0, input.paint_color1),
         );
-        blend_color(color, shadow_coverage(shadow, scene_position))
+        blend_color(
+            color,
+            shadow_coverage(shadow, scene_position)
+                * ContentMask::alpha(shadow.content_mask, scene_position),
+        )
     }
 
     #[derive(Wgsl)]
@@ -340,6 +344,9 @@ pub mod shadow {
             scene_position,
             PreparedPaint::new(input.paint_solid, input.paint_color0, input.paint_color1),
         );
-        blend_color(color, coverage)
+        blend_color(
+            color,
+            coverage * ContentMask::alpha(shadow.content_mask, input.position.xy()),
+        )
     }
 }

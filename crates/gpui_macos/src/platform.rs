@@ -226,18 +226,7 @@ impl MacPlatform {
         let marker = MainThreadMarker::new().expect("Mac platform not created on main thread");
         let dispatcher = Arc::new(MacDispatcher::new());
 
-        #[cfg(feature = "font-kit")]
         let text_system = Arc::new(crate::MacTextSystem::new());
-
-        #[cfg(not(feature = "font-kit"))]
-        let text_system = {
-            if !headless {
-                log::warn!(
-                    "gpui_macos was compiled without the `font-kit` feature, so no text will be rendered."
-                );
-            }
-            Arc::new(gpui::NoopTextSystem::new())
-        };
 
         let keyboard_layout = MacKeyboardLayout::new();
         let keyboard_mapper = Rc::new(MacKeyboardMapper::new(keyboard_layout.id()));
@@ -696,6 +685,15 @@ impl Platform for MacPlatform {
         Some(MacWindow::ordered_windows())
     }
 
+    #[cfg(feature = "wgpu")]
+    fn set_gpu_requirements(&self, requirements: Box<dyn std::any::Any>) {
+        if let Ok(reqs) = requirements.downcast::<gpui_wgpu::WgpuDeviceRequirements>() {
+            self.0.lock().renderer_context.set_requirements(*reqs);
+        } else {
+            log::warn!("set_gpu_requirements: unexpected type, expected WgpuDeviceRequirements");
+        }
+    }
+
     fn open_window(
         &self,
         handle: AnyWindowHandle,
@@ -717,13 +715,18 @@ impl Platform for MacPlatform {
             )
         };
 
+        let renderer = renderer::new_renderer(
+            renderer_context,
+            options.bounds.size.map(|pixels| pixels.as_f32()),
+            false,
+        )?;
         Ok(Box::new(MacWindow::open(
             handle,
             options,
             cursor_visible,
             foreground_executor,
             background_executor,
-            renderer_context,
+            renderer,
             self.1,
         )))
     }

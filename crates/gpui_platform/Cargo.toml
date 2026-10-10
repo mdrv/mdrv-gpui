@@ -31,15 +31,30 @@ screen-capture = [
   "gpui_macos/screen-capture",
   "gpui_windows/screen-capture",
 ]
+# macOS windows draw with the WGPU renderer instead of Metal. Custom GPU
+# controls also need gpui_wgpu's `custom-gpu` feature to share its device.
+macos-wgpu = ["gpui_macos/wgpu"]
 wayland = ["gpui_linux/wayland"]
 x11 = ["gpui_linux/x11"]
 
 [dependencies]
 gpui.workspace = true
 
+[dev-dependencies]
+gpui_fonts = { path = "../gpui_ce_fonts", version = "0.2.2", package = "gpui-ce-fonts" }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui_apple.workspace = true
 gpui_macos.workspace = true
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+gpui_apple = { workspace = true, features = ["test-support"] }
+gpui_macos = { workspace = true, features = ["test-support"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))'.dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+gpui_wgpu = { workspace = true, features = ["test-support"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 gpui_windows.workspace = true
@@ -51,3 +66,8 @@ gpui_linux.workspace = true
 [target.'cfg(target_family = "wasm")'.dependencies]
 gpui_web = { path = "../gpui_web", version = "0.270.0", package = "mdrv-gpui-web", default-features = false }
 console_error_panic_hook.workspace = true
+
+[[test]]
+name = "parley_render"
+path = "tests/parley_render.rs"
+harness = false

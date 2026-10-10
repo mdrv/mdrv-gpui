@@ -675,8 +675,7 @@ impl WaylandWindowState {
     }
 
     pub fn is_transparent(&self) -> bool {
-        self.decorations == WindowDecorations::Client
-            || self.background_appearance != WindowBackgroundAppearance::Opaque
+        self.decorations == WindowDecorations::Client || self.background_appearance.is_transparent()
     }
 
     fn prepare_to_map(&self) {
@@ -1944,6 +1943,11 @@ impl PlatformWindow for WaylandWindow {
         self.borrow_mut().input_handler.take()
     }
 
+    fn show_character_palette(&self) {
+        let client = self.borrow().client.clone();
+        client.show_character_palette(&self.0.surface());
+    }
+
     fn prompt(
         &self,
         _level: PromptLevel,
@@ -2475,9 +2479,7 @@ fn update_window(mut state: RefMut<WaylandWindowState>) {
 
     // Note that rounded corners make this rectangle API hard to work with.
     // As this is common when using CSD, let's just disable this API.
-    if state.background_appearance == WindowBackgroundAppearance::Opaque
-        && state.decorations == WindowDecorations::Server
-    {
+    if state.background_appearance.is_opaque() && state.decorations == WindowDecorations::Server {
         // Promise the compositor that this region of the window surface
         // contains no transparent pixels. This allows the compositor to skip
         // updating whatever is behind the surface for better performance.

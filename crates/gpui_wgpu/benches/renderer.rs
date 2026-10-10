@@ -54,7 +54,10 @@ fn unplanned_quad_scene(count: usize) -> Scene {
         scene.insert_primitive(Quad {
             order: index as u32,
             bounds,
-            content_mask: ContentMask { bounds },
+            content_mask: ContentMask {
+                bounds,
+                ..Default::default()
+            },
             background: solid_background(gpui::rgb(0x336699)),
             ..Default::default()
         });
@@ -78,7 +81,10 @@ fn unplanned_mixed_scene(count: usize) -> Scene {
         scene.insert_primitive(Quad {
             order: (index * 2) as u32,
             bounds,
-            content_mask: ContentMask { bounds },
+            content_mask: ContentMask {
+                bounds,
+                ..Default::default()
+            },
             background: solid_background(gpui::rgb(0x336699)),
             ..Default::default()
         });
@@ -86,7 +92,10 @@ fn unplanned_mixed_scene(count: usize) -> Scene {
             order: (index * 2 + 1) as u32,
             padding: 0,
             bounds,
-            content_mask: ContentMask { bounds },
+            content_mask: ContentMask {
+                bounds,
+                ..Default::default()
+            },
             color: white().into(),
             thickness: ScaledPixels(1.0),
             wavy: ShaderBool::Disabled,
@@ -95,7 +104,7 @@ fn unplanned_mixed_scene(count: usize) -> Scene {
     scene
 }
 
-fn bench_renderer(c: &mut Criterion) {
+fn bench_renderer(criterion: &mut Criterion) {
     let mut renderer = WgpuHeadlessRenderer::new().expect("headless WGPU renderer must initialize");
     let single_quad = quad_scene(1);
     let dense_quads = quad_scene(512);
@@ -113,58 +122,58 @@ fn bench_renderer(c: &mut Criterion) {
     let mut mixed_batches = unplanned_mixed_scene(512);
     mixed_batches.finish();
 
-    let mut group = c.benchmark_group("renderer_end_to_end");
-    group.bench_function("single_quad", |b| {
-        b.iter(|| {
+    let mut group = criterion.benchmark_group("renderer_end_to_end");
+    group.bench_function("single_quad", |bencher| {
+        bencher.iter(|| {
             renderer
                 .render_scene_to_image(&single_quad, TARGET_SIZE)
                 .expect("single quad render must succeed")
         })
     });
-    group.bench_function("512_quads", |b| {
-        b.iter(|| {
+    group.bench_function("512_quads", |bencher| {
+        bencher.iter(|| {
             renderer
                 .render_scene_to_image(&dense_quads, TARGET_SIZE)
                 .expect("dense quad render must succeed")
         })
     });
-    group.bench_function("single_quad_wait", |b| {
-        b.iter(|| {
+    group.bench_function("single_quad_wait", |bencher| {
+        bencher.iter(|| {
             renderer
                 .render_scene_and_wait(&single_quad, TARGET_SIZE)
                 .expect("single quad render must succeed")
         })
     });
-    group.bench_function("512_quads_wait", |b| {
-        b.iter(|| {
+    group.bench_function("512_quads_wait", |bencher| {
+        bencher.iter(|| {
             renderer
                 .render_scene_and_wait(&dense_quads, TARGET_SIZE)
                 .expect("dense quad render must succeed")
         })
     });
-    group.bench_function("512_compact_smoothed_quads_wait", |b| {
-        b.iter(|| {
+    group.bench_function("512_compact_smoothed_quads_wait", |bencher| {
+        bencher.iter(|| {
             renderer
                 .render_scene_and_wait(&compact_smoothed_quads, TARGET_SIZE)
                 .expect("compact smoothed quad render must succeed")
         })
     });
-    group.bench_function("512_reach_aware_smoothed_quads_wait", |b| {
-        b.iter(|| {
+    group.bench_function("512_reach_aware_smoothed_quads_wait", |bencher| {
+        bencher.iter(|| {
             renderer
                 .render_scene_and_wait(&reach_aware_smoothed_quads, TARGET_SIZE)
                 .expect("reach-aware smoothed quad render must succeed")
         })
     });
-    group.bench_function("512_alternating_corner_modes_wait", |b| {
-        b.iter(|| {
+    group.bench_function("512_alternating_corner_modes_wait", |bencher| {
+        bencher.iter(|| {
             renderer
                 .render_scene_and_wait(&alternating_corner_modes, TARGET_SIZE)
                 .expect("alternating corner modes must render successfully")
         })
     });
-    group.bench_function("1024_mixed_batches_wait", |b| {
-        b.iter(|| {
+    group.bench_function("1024_mixed_batches_wait", |bencher| {
+        bencher.iter(|| {
             renderer
                 .render_scene_and_wait(&mixed_batches, TARGET_SIZE)
                 .expect("mixed batch render must succeed")
@@ -172,9 +181,9 @@ fn bench_renderer(c: &mut Criterion) {
     });
     group.finish();
 
-    let mut group = c.benchmark_group("scene_plan");
-    group.bench_function("compile_1024_mixed_batches", |b| {
-        b.iter_batched(
+    let mut group = criterion.benchmark_group("scene_plan");
+    group.bench_function("compile_1024_mixed_batches", |bencher| {
+        bencher.iter_batched(
             || unplanned_mixed_scene(512),
             |mut scene| {
                 scene.finish();
@@ -185,8 +194,8 @@ fn bench_renderer(c: &mut Criterion) {
     });
     let mut mixed_scene = unplanned_mixed_scene(512);
     mixed_scene.finish();
-    group.bench_function("traverse_1024_mixed_batches", |b| {
-        b.iter(|| {
+    group.bench_function("traverse_1024_mixed_batches", |bencher| {
+        bencher.iter(|| {
             for command in mixed_scene.render_commands() {
                 black_box(command);
             }

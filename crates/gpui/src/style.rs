@@ -1,9 +1,9 @@
 use crate::{
     AbsoluteLength, App, Background, BorderStyle, Bounds, ColorExt, ContentMask, Corners,
     CornersRefinement, CursorStyle, DefiniteLength, DevicePixels, Edges, EdgesRefinement, Font,
-    FontFallbacks, FontFeatures, FontStyle, FontWeight, GridLocation, Length, Pixels, Point,
-    PointRefinement, ScaledPixels, SharedString, Size, SizeRefinement, Styled, TextRun, Window,
-    black, phi, point, px, quad, rems, size, transparent_black,
+    FontFallbacks, FontFeatures, FontStyle, FontWeight, FontWidth, GridLocation, Length, Pixels,
+    Point, PointRefinement, ScaledPixels, SharedString, Size, SizeRefinement, Styled, TextRun,
+    Window, black, phi, point, px, quad, rems, size, transparent_black,
 };
 use collections::HashSet;
 use palette::{Hsla, IntoColor, rgb::Rgba};
@@ -239,10 +239,23 @@ pub struct Style {
     /// Should the element be painted on screen?
     pub visibility: Visibility,
 
+    /// The inline direction of this element and its descendants.
+    pub direction: LayoutDirection,
+
+    /// How this element participates in Unicode bidirectional text formatting.
+    pub unicode_bidi: UnicodeBidi,
+
+    /// Whether `unicode_bidi` was authored rather than supplied by its initial value.
+    #[doc(hidden)]
+    pub unicode_bidi_explicit: bool,
+
     // Overflow properties
     /// How children overflowing their container should affect layout
     #[refineable]
     pub overflow: Point<Overflow>,
+    /// Edge fade distances for overflow masking.
+    #[refineable]
+    pub overflow_fade: Edges<AbsoluteLength>,
     /// How much space (in points) should be reserved for the scrollbars of `Overflow::Scroll` and `Overflow::Auto` nodes.
     pub scrollbar_width: AbsoluteLength,
     /// Whether both x and y axis should be scrollable at the same time.
@@ -310,6 +323,8 @@ pub struct Style {
     pub align_items: Option<AlignItems>,
     /// How this node should be aligned in the cross/block axis. Falls back to the parents [`AlignItems`] if not set
     pub align_self: Option<AlignSelf>,
+    /// How this element aligns vertically when it participates in an inline formatting context.
+    pub vertical_align: VerticalAlign,
     /// How should content contained within this item be aligned in the cross/block axis
     pub align_content: Option<AlignContent>,
     /// How should contained within this item be aligned in the main/inline axis
@@ -421,6 +436,67 @@ pub enum Visibility {
     Visible,
     /// The element should not be drawn, but should still take up space in the layout.
     Hidden,
+}
+
+/// The inline direction established by an element.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum LayoutDirection {
+    /// Use the resolved direction of the logical parent.
+    #[default]
+    Inherit,
+    /// Establish left-to-right directionality.
+    LeftToRight,
+    /// Establish right-to-left directionality.
+    RightToLeft,
+    /// Determine direction from eligible source text.
+    Auto,
+}
+
+/// An element direction after inheritance and automatic detection have been resolved.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub enum ResolvedDirection {
+    /// Left-to-right inline direction.
+    #[default]
+    LeftToRight,
+    /// Right-to-left inline direction.
+    RightToLeft,
+}
+
+impl ResolvedDirection {
+    /// Returns whether this direction is right-to-left.
+    pub fn is_rtl(self) -> bool {
+        self == Self::RightToLeft
+    }
+
+    pub(crate) fn from_first_strong(text: &str) -> Option<Self> {
+        use unicode_bidi::BidiClass;
+
+        text.chars()
+            .find_map(|character| match unicode_bidi::bidi_class(character) {
+                BidiClass::L => Some(Self::LeftToRight),
+                BidiClass::R | BidiClass::AL => Some(Self::RightToLeft),
+                _ => None,
+            })
+    }
+}
+
+/// Controls the Unicode bidirectional scope established by an element.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum UnicodeBidi {
+    /// Apply ordinary bidirectional processing without another scope.
+    #[default]
+    Normal,
+    /// Establish a directional embedding.
+    Embed,
+    /// Isolate the element's inline content from surrounding content.
+    Isolate,
+    /// Override the ordering of inline content with the element direction.
+    BidiOverride,
+    /// Isolate the content and override its ordering.
+    IsolateOverride,
+    /// Determine each paragraph's direction from its own content.
+    Plaintext,
 }
 
 /// The possible values of the box-shadow property
@@ -542,10 +618,16 @@ pub enum TextOverflow {
 }
 
 /// How to align text within the element
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub enum TextAlign {
-    /// Align the text to the left of the element
+    /// Align text to the start edge for the line's direction.
     #[default]
+    Start,
+
+    /// Align text to the end edge for the line's direction.
+    End,
+
+    /// Align the text to the physical left edge of the element.
     Left,
 
     /// Center the text within the element
@@ -607,6 +689,9 @@ pub struct TextStyle {
     /// The font weight, e.g. bold
     pub font_weight: FontWeight,
 
+    /// The font width as a percentage of normal width.
+    pub font_width: FontWidth,
+
     /// The font style, e.g. italic
     pub font_style: FontStyle,
 
@@ -651,6 +736,7 @@ impl Default for TextStyle {
             font_size: rems(1.).into(),
             line_height: phi().into(),
             font_weight: FontWeight::default(),
+            font_width: FontWidth::default(),
             font_style: FontStyle::default(),
             background_color: None,
             underline: None,
@@ -672,6 +758,11 @@ impl TextStyle {
         if let Some(weight) = style.font_weight {
             self.font_weight = weight;
         }
+
+        if let Some(width) = style.font_width {
+            self.font_width = width;
+        }
+
         if let Some(style) = style.font_style {
             self.font_style = style;
         }
@@ -706,6 +797,7 @@ impl TextStyle {
             features: self.font_features.clone(),
             fallbacks: self.font_fallbacks.clone(),
             weight: self.font_weight,
+            width: self.font_width,
             style: self.font_style,
         }
     }
@@ -724,6 +816,7 @@ impl TextStyle {
                 features: self.font_features.clone(),
                 fallbacks: self.font_fallbacks.clone(),
                 weight: self.font_weight,
+                width: self.font_width,
                 style: self.font_style,
             },
             color: self.color,
@@ -750,6 +843,9 @@ pub struct HighlightStyle {
     /// The font weight, e.g. bold
     pub font_weight: Option<FontWeight>,
 
+    /// The font width as a percentage of normal width.
+    pub font_width: Option<FontWidth>,
+
     /// The font style, e.g. italic
     pub font_style: Option<FontStyle>,
 
@@ -767,6 +863,18 @@ pub struct HighlightStyle {
 }
 
 impl Style {
+    /// Resolves the initial Unicode bidi behavior against this style's direction.
+    #[doc(hidden)]
+    pub fn effective_unicode_bidi(&self) -> UnicodeBidi {
+        if self.unicode_bidi_explicit {
+            self.unicode_bidi
+        } else if self.direction == LayoutDirection::Inherit {
+            UnicodeBidi::Normal
+        } else {
+            UnicodeBidi::Isolate
+        }
+    }
+
     /// Returns true if the style is visible and the background is opaque.
     pub fn has_opaque_background(&self) -> bool {
         self.background
@@ -829,13 +937,64 @@ impl Style {
                     (false, false) => Bounds::from_corners(min, max),
                 };
 
-                Some(ContentMask { bounds })
+                let mut fade_out = self.overflow_fade.to_pixels(rem_size);
+                if self.overflow.x == Overflow::Visible {
+                    fade_out.left = Pixels::ZERO;
+                    fade_out.right = Pixels::ZERO;
+                }
+                if self.overflow.y == Overflow::Visible {
+                    fade_out.top = Pixels::ZERO;
+                    fade_out.bottom = Pixels::ZERO;
+                }
+
+                Some(ContentMask { bounds, fade_out })
             }
         }
     }
 
+    /// Get the content mask for a container that always clips and scrolls
+    /// vertically, like [`List`](crate::List) and
+    /// [`UniformList`](crate::UniformList): the vertical axis always clips,
+    /// the horizontal axis clips according to `overflow.x`, and
+    /// `overflow_fade` distances apply on each clipped axis.
+    pub fn scroll_mask(&self, bounds: Bounds<Pixels>, rem_size: Pixels) -> ContentMask<Pixels> {
+        let scroll_style = Style {
+            overflow: Point {
+                x: self.overflow.x,
+                y: Overflow::Scroll,
+            },
+            border_color: self.border_color,
+            border_widths: self.border_widths,
+            overflow_fade: self.overflow_fade,
+            ..Style::default()
+        };
+        scroll_style
+            .overflow_mask(bounds, rem_size)
+            .expect("vertical scrolling always clips")
+    }
+
     /// Paints the background of an element styled with this style.
     pub fn paint(
+        &self,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+        continuation: impl FnOnce(&mut Window, &mut App),
+    ) {
+        if let Some(fragments) = window.current_inline_fragments.clone() {
+            for fragment in fragments.iter() {
+                self.paint_box(*fragment, window, cx, |_, _| {});
+            }
+
+            continuation(window, cx);
+
+            return;
+        }
+
+        self.paint_box(bounds, window, cx, continuation);
+    }
+
+    fn paint_box(
         &self,
         bounds: Bounds<Pixels>,
         window: &mut Window,
@@ -970,10 +1129,14 @@ impl Default for Style {
         Style {
             display: Display::Block,
             visibility: Visibility::Visible,
+            direction: LayoutDirection::Inherit,
+            unicode_bidi: UnicodeBidi::Normal,
+            unicode_bidi_explicit: false,
             overflow: Point {
                 x: Overflow::Visible,
                 y: Overflow::Visible,
             },
+            overflow_fade: Edges::<AbsoluteLength>::zero(),
             allow_concurrent_scroll: false,
             restrict_scroll_to_axis: false,
             scrollbar_width: AbsoluteLength::default(),
@@ -990,6 +1153,7 @@ impl Default for Style {
             // Alignment
             align_items: None,
             align_self: None,
+            vertical_align: VerticalAlign::Baseline,
             align_content: None,
             justify_content: None,
             // Flexbox
@@ -1089,6 +1253,7 @@ impl From<&TextStyle> for HighlightStyle {
         Self {
             color: Some(other.color),
             font_weight: Some(other.font_weight),
+            font_width: Some(other.font_width),
             font_style: Some(other.font_style),
             background_color: other.background_color,
             underline: other.underline,
@@ -1122,6 +1287,7 @@ impl HighlightStyle {
                 })
                 .or(self.color),
             font_weight: other.font_weight.or(self.font_weight),
+            font_width: other.font_width.or(self.font_width),
             font_style: other.font_style.or(self.font_style),
             background_color: other.background_color.or(self.background_color),
             underline: other.underline.or(self.underline),
@@ -1267,6 +1433,24 @@ pub type AlignSelf = AlignItems;
 /// [MDN](https://developer.mozilla.org/en-US/docs/Web/CSS/justify-self)
 pub type JustifySelf = AlignItems;
 
+/// Controls the vertical position of an element box in an inline formatting context.
+///
+/// This property has no effect on ordinary block, flex, or grid layout.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub enum VerticalAlign {
+    /// Align the bottom of the box with the text baseline.
+    #[default]
+    Baseline,
+    /// Align the box midpoint with the parent baseline plus half the parent font's x-height.
+    /// This is CSS text-metric alignment. Use `self_center` or `items_center` for flex or grid
+    /// container centering.
+    Middle,
+    /// Align the top of the box with the top of its line.
+    Top,
+    /// Align the bottom of the box with the bottom of its line.
+    Bottom,
+}
+
 /// Sets the distribution of space between and around content items
 /// For Flexbox it controls alignment in the cross axis
 /// For Grid it controls alignment in the block axis
@@ -1313,18 +1497,28 @@ pub type JustifyContent = AlignContent;
 
 /// Sets the layout used for the children of this node
 ///
-/// The default values depends on on which feature flags are enabled. The order of precedence is: Flex, Grid, Block, None.
+/// Defaults to flex layout. Block containers arrange text and inline children in paragraphs.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
-// Copy of taffy::style type of the same name, to derive JsonSchema.
+// Inline participation is handled by GPUI before independent box layout in Taffy.
 pub enum Display {
     /// The children will follow the block layout algorithm
     Block,
+
     /// The children will follow the flexbox layout algorithm
     #[default]
     Flex,
+
     /// The children will follow the CSS Grid layout algorithm
     Grid,
-    /// The children will not be laid out, and will follow absolute positioning
+
+    /// Contributes its contents to the surrounding paragraph, wrapping across lines.
+    /// As a root or flex/grid item, lays out its contents independently using block flow.
+    Inline,
+
+    /// An atomic inline box whose children use flex layout.
+    InlineFlex,
+
+    /// The element and its children are hidden and occupy no space.
     None,
 }
 
@@ -1467,8 +1661,8 @@ impl From<AlignContent> for taffy::style::AlignContent {
 impl From<Display> for taffy::style::Display {
     fn from(value: Display) -> Self {
         match value {
-            Display::Block => Self::Block,
-            Display::Flex => Self::Flex,
+            Display::Block | Display::Inline => Self::Block,
+            Display::Flex | Display::InlineFlex => Self::Flex,
             Display::Grid => Self::Grid,
             Display::None => Self::None,
         }
@@ -1565,6 +1759,7 @@ mod tests {
             fade_out: Some(0.),
             font_style: Some(FontStyle::Italic),
             font_weight: Some(FontWeight(300.)),
+            font_width: Some(FontWidth::CONDENSED),
             background_color: Some(yellow()),
             underline: Some(UnderlineStyle {
                 thickness: px(2.),
@@ -1573,6 +1768,11 @@ mod tests {
             }),
         };
         let expected_style = style_b;
+
+        assert_eq!(
+            TextStyle::default().highlight(style_b).font_width,
+            FontWidth::CONDENSED
+        );
 
         let style_a = style_a.highlight(style_b);
         assert_eq!(
@@ -1597,6 +1797,7 @@ mod tests {
             fade_out: Some(0.),
             font_style: Some(FontStyle::Oblique),
             font_weight: Some(FontWeight(800.)),
+            font_width: Some(FontWidth::EXPANDED),
             background_color: Some(green()),
             underline: Some(UnderlineStyle {
                 thickness: px(4.),
@@ -1615,6 +1816,7 @@ mod tests {
             fade_out: Some(0.),
             font_style: Some(FontStyle::Oblique),
             font_weight: Some(FontWeight(800.)),
+            font_width: Some(FontWidth::EXPANDED),
             background_color: Some(green()),
             underline: Some(UnderlineStyle {
                 thickness: px(4.),
@@ -1724,6 +1926,7 @@ mod tests {
         let mut style = Style::default();
         style.refine(&StyleRefinement::default().text_size(px(20.0)));
         style.refine(&StyleRefinement::default().font_weight(FontWeight::SEMIBOLD));
+        style.refine(&StyleRefinement::default().font_width(87.5));
 
         assert_eq!(
             Some(AbsoluteLength::from(px(20.0))),
@@ -1734,6 +1937,22 @@ mod tests {
             Some(FontWeight::SEMIBOLD),
             style.text_style().unwrap().font_weight
         );
+
+        let mut resolved = TextStyle::default();
+        resolved.refine(style.text_style().unwrap());
+        let inherited = resolved.highlight(HighlightStyle::color(red()));
+
+        assert_eq!(inherited.font().width, FontWidth::SEMI_CONDENSED);
+        assert_eq!(inherited.to_run(4).font.width, FontWidth::SEMI_CONDENSED);
+        assert_eq!(
+            HighlightStyle::from(&inherited).font_width,
+            Some(FontWidth::SEMI_CONDENSED)
+        );
+
+        let mut element = crate::div()
+            .font_width(FontWidth::CONDENSED)
+            .font(crate::font("IBM Plex Sans"));
+        assert_eq!(element.text_style().font_width, Some(FontWidth::NORMAL));
     }
 
     #[test]

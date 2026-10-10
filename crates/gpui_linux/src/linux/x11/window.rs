@@ -295,7 +295,7 @@ pub struct X11WindowState {
 
 impl X11WindowState {
     fn is_transparent(&self) -> bool {
-        self.background_appearance != WindowBackgroundAppearance::Opaque
+        self.background_appearance.is_transparent()
     }
 }
 
@@ -1508,6 +1508,14 @@ impl PlatformWindow for X11Window {
 
     fn take_input_handler(&mut self) -> Option<PlatformInputHandler> {
         self.0.state.borrow_mut().input_handler.take()
+    }
+
+    fn show_character_palette(&self) {
+        let Some(client) = self.0.state.borrow().client.get_client() else {
+            return;
+        };
+        let executor = client.0.borrow().common.background_executor.clone();
+        crate::linux::character_palette::show_character_palette(executor, None);
     }
 
     fn prompt(

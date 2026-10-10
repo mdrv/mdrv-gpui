@@ -1,9 +1,10 @@
 use crate::{
     self as gpui, AbsoluteLength, AlignContent, AlignItems, AlignSelf, BorderStyle, CursorStyle,
-    DefiniteLength, Display, Fill, Filter, FlexDirection, FlexWrap, Font, FontFeatures, FontStyle,
-    FontWeight, GridPlacement, GridTemplate, GridTemplateMinSize, JustifyContent, Length, Pixels,
-    SharedString, StrikethroughStyle, StyleRefinement, TextAlign, TextOverflow,
-    TextStyleRefinement, TextTransform, UnderlineStyle, WhiteSpace, px, relative, rems,
+    DefiniteLength, Display, Edges, Fill, Filter, FlexDirection, FlexWrap, Font, FontFeatures,
+    FontStyle, FontWeight, FontWidth, GridPlacement, GridTemplate, GridTemplateMinSize,
+    JustifyContent, LayoutDirection, Length, Pixels, SharedString, StrikethroughStyle,
+    StyleRefinement, TextAlign, TextOverflow, TextStyleRefinement, TextTransform, UnderlineStyle,
+    UnicodeBidi, VerticalAlign, WhiteSpace, px, relative, rems,
 };
 pub use gpui_macros::{
     border_style_methods, box_shadow_style_methods, cursor_style_methods, margin_style_methods,
@@ -11,6 +12,7 @@ pub use gpui_macros::{
     visibility_style_methods,
 };
 use palette::{Hsla, IntoColor};
+use refineable::Refineable;
 const ELLIPSIS: SharedString = SharedString::new_static("…");
 
 /// A trait for elements that can be styled.
@@ -24,6 +26,13 @@ pub trait Styled: Sized {
     /// Returns a reference to the style memory of this element.
     fn style(&mut self) -> &mut StyleRefinement;
 
+    /// Applies the given refinement to this element's style.
+    fn refine_style(mut self, refinement: &StyleRefinement) -> Self {
+        self.style().refine(refinement);
+
+        self
+    }
+
     gpui_macros::style_helpers!();
     gpui_macros::visibility_style_methods!();
     gpui_macros::margin_style_methods!();
@@ -33,6 +42,32 @@ pub trait Styled: Sized {
     gpui_macros::cursor_style_methods!();
     gpui_macros::border_style_methods!();
     gpui_macros::box_shadow_style_methods!();
+
+    /// Sets the inline direction for this element and its logical descendants.
+    fn direction(mut self, direction: LayoutDirection) -> Self {
+        self.style().direction = Some(direction);
+
+        self
+    }
+
+    /// Establishes right-to-left directionality for this element.
+    fn rtl(self) -> Self {
+        self.direction(LayoutDirection::RightToLeft)
+    }
+
+    /// Establishes left-to-right directionality for this element.
+    fn ltr(self) -> Self {
+        self.direction(LayoutDirection::LeftToRight)
+    }
+
+    /// Sets this element's Unicode bidirectional formatting behavior.
+    fn unicode_bidi(mut self, unicode_bidi: UnicodeBidi) -> Self {
+        let style = self.style();
+        style.unicode_bidi = Some(unicode_bidi);
+        style.unicode_bidi_explicit = Some(true);
+
+        self
+    }
 
     /// Blur this element's own content and children, like CSS `filter: blur(<radius>)`.
     ///
@@ -81,32 +116,73 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Sets the display type of the element.
+    fn display(mut self, display: Display) -> Self {
+        self.style().display = Some(display);
+        self
+    }
+
     /// Sets the display type of the element to `block`.
     /// [Docs](https://tailwindcss.com/docs/display)
-    fn block(mut self) -> Self {
-        self.style().display = Some(Display::Block);
-        self
+    fn block(self) -> Self {
+        self.display(Display::Block)
     }
 
     /// Sets the display type of the element to `flex`.
     /// [Docs](https://tailwindcss.com/docs/display)
-    fn flex(mut self) -> Self {
-        self.style().display = Some(Display::Flex);
-        self
+    fn flex(self) -> Self {
+        self.display(Display::Flex)
     }
 
     /// Sets the display type of the element to `grid`.
     /// [Docs](https://tailwindcss.com/docs/display)
-    fn grid(mut self) -> Self {
-        self.style().display = Some(Display::Grid);
+    fn grid(self) -> Self {
+        self.display(Display::Grid)
+    }
+
+    /// Contributes this element's contents to a block parent's paragraph.
+    /// Nested inline elements wrap together without adding whitespace or breaks.
+    fn inline(self) -> Self {
+        self.display(Display::Inline)
+    }
+
+    /// Places this element in a paragraph as one atomic box with flex layout inside.
+    fn inline_flex(self) -> Self {
+        self.display(Display::InlineFlex)
+    }
+
+    /// Sets the vertical alignment of this element when it is placed in an inline layout.
+    fn vertical_align(mut self, align: VerticalAlign) -> Self {
+        self.style().vertical_align = Some(align);
         self
+    }
+
+    /// Aligns this inline element box with the surrounding text baseline.
+    fn align_baseline(self) -> Self {
+        self.vertical_align(VerticalAlign::Baseline)
+    }
+
+    /// Aligns this inline box's midpoint with the parent baseline plus half its font's x-height,
+    /// following CSS `vertical-align: middle`.
+    /// For flex or grid centering, use `self_center` on the item or `items_center` on its container.
+    fn align_middle(self) -> Self {
+        self.vertical_align(VerticalAlign::Middle)
+    }
+
+    /// Aligns this inline element box with the top of its line.
+    fn align_top(self) -> Self {
+        self.vertical_align(VerticalAlign::Top)
+    }
+
+    /// Aligns this inline element box with the bottom of its line.
+    fn align_bottom(self) -> Self {
+        self.vertical_align(VerticalAlign::Bottom)
     }
 
     /// Sets the display type of the element to `none`.
     /// [Docs](https://tailwindcss.com/docs/display)
-    fn hidden(mut self) -> Self {
-        self.style().display = Some(Display::None);
-        self
+    fn hidden(self) -> Self {
+        self.display(Display::None)
     }
 
     /// Set the space to be reserved for rendering the scrollbar.
@@ -116,6 +192,33 @@ pub trait Styled: Sized {
     fn scrollbar_width(mut self, width: impl Into<AbsoluteLength>) -> Self {
         self.style().scrollbar_width = Some(width.into());
         self
+    }
+
+    /// Sets per-edge fade distances for content clipped by overflow.
+    ///
+    /// Content is faded to transparent over the given distance as it approaches
+    /// the corresponding clipped edge of this element, similar to a CSS
+    /// `mask-image: linear-gradient(...)`.
+    fn overflow_fade(mut self, fade: impl Into<Edges<AbsoluteLength>>) -> Self {
+        let fade = fade.into();
+        let overflow_fade = &mut self.style().overflow_fade;
+        overflow_fade.top = Some(fade.top);
+        overflow_fade.right = Some(fade.right);
+        overflow_fade.bottom = Some(fade.bottom);
+        overflow_fade.left = Some(fade.left);
+        self
+    }
+
+    /// Sets equal fade distances on the left and right overflow edges,
+    /// clearing any fade on the top and bottom edges.
+    fn overflow_fade_x(self, fade: impl Into<AbsoluteLength>) -> Self {
+        self.overflow_fade(Edges::horizontal(fade.into()))
+    }
+
+    /// Sets equal fade distances on the top and bottom overflow edges,
+    /// clearing any fade on the left and right edges.
+    fn overflow_fade_y(self, fade: impl Into<AbsoluteLength>) -> Self {
+        self.overflow_fade(Edges::vertical(fade.into()))
     }
 
     /// Sets the whitespace of the element.
@@ -172,6 +275,16 @@ pub trait Styled: Sized {
     fn text_align(mut self, align: TextAlign) -> Self {
         self.text_style().text_align = Some(align);
         self
+    }
+
+    /// Aligns text to the start edge for each line's direction.
+    fn text_start(self) -> Self {
+        self.text_align(TextAlign::Start)
+    }
+
+    /// Aligns text to the end edge for each line's direction.
+    fn text_end(self) -> Self {
+        self.text_align(TextAlign::End)
     }
 
     /// Sets the text alignment to left
@@ -454,6 +567,18 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Packs items against the flex-relative start of the main axis.
+    fn justify_flex_start(mut self) -> Self {
+        self.style().justify_content = Some(JustifyContent::FlexStart);
+        self
+    }
+
+    /// Packs items against the flex-relative end of the main axis.
+    fn justify_flex_end(mut self) -> Self {
+        self.style().justify_content = Some(JustifyContent::FlexEnd);
+        self
+    }
+
     /// Sets the element to justify flex items along the center of the container's main axis.
     /// [Docs](https://tailwindcss.com/docs/justify-content#center)
     fn justify_center(mut self) -> Self {
@@ -609,6 +734,15 @@ pub trait Styled: Sized {
     /// This value cascades to its child elements.
     fn font_weight(mut self, weight: FontWeight) -> Self {
         self.text_style().font_weight = Some(weight);
+        self
+    }
+
+    /// Sets the font width of this element and its children.
+    ///
+    /// Accepts a percentage or a [`FontWidth`] preset.
+    fn font_width(mut self, width: impl Into<FontWidth>) -> Self {
+        self.text_style().font_width = Some(width.into());
+
         self
     }
 
@@ -811,6 +945,7 @@ pub trait Styled: Sized {
             features,
             fallbacks,
             weight,
+            width,
             style,
         } = font;
 
@@ -818,6 +953,7 @@ pub trait Styled: Sized {
         text_style.font_family = Some(family);
         text_style.font_features = Some(features);
         text_style.font_weight = Some(weight);
+        text_style.font_width = Some(width);
         text_style.font_style = Some(style);
         text_style.font_fallbacks = fallbacks;
 

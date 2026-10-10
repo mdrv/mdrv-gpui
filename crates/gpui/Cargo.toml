@@ -11,7 +11,7 @@ homepage = "https://gpui-ce.github.io/"
 readme = "README.md"
 keywords = ["desktop", "gui", "immediate"]
 categories = ["gui"]
-rust-version = "1.95" # required for Vec::push_mut
+rust-version = "1.95"                                                  # required for Vec::push_mut
 
 [lints]
 workspace = true
@@ -41,6 +41,7 @@ windows-manifest = ["dep:embed-resource"]
 profiler = ["dep:hdrhistogram"]
 stacker = ["dep:stacksafe"]
 embedded-assets = ["dep:rust-embed"]
+hot-patching = ["dep:dioxus-devtools", "dep:subsecond"]
 
 [lib]
 name = "gpui"
@@ -58,6 +59,7 @@ collections.workspace = true
 criterion = { workspace = true, optional = true }
 ctor.workspace = true
 derive_more.workspace = true
+derive_setters.workspace = true
 etagere.workspace = true
 futures.workspace = true
 futures-concurrency.workspace = true
@@ -72,6 +74,7 @@ num_cpus = "1.13"
 parking = "2.0.0"
 parking_lot.workspace = true
 palette.workspace = true
+phf.workspace = true
 postage.workspace = true
 proptest = { workspace = true, optional = true }
 chrono.workspace = true
@@ -105,6 +108,7 @@ thiserror.workspace = true
 tracing.workspace = true
 gpui_util.workspace = true
 unicode-segmentation.workspace = true
+unicode-bidi.workspace = true
 hdrhistogram = { workspace = true, optional = true }
 waker-fn = "1.2.0"
 lyon = "1.0"
@@ -119,6 +123,10 @@ heapless.workspace = true
 [target.'cfg(target_family = "wasm")'.dependencies]
 getrandom = { version = "0.3.4", features = ["wasm_js"] }
 uuid = { workspace = true, features = ["js"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+dioxus-devtools = { version = "=0.7.10", features = ["serve"], optional = true }
+subsecond = { version = "=0.7.10", optional = true }
 
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -148,7 +156,9 @@ backtrace.workspace = true
 smol.workspace = true
 collections = { workspace = true, features = ["test-support"] }
 env_logger.workspace = true
+gpui_ce_elements = { path = "../gpui_elements", package = "mdrv-gpui-elements" }
 gpui_platform = { workspace = true, features = ["font-kit", "wayland", "x11"] }
+gpui_fonts = { path = "../gpui_ce_fonts", version = "0.2.2", package = "gpui-ce-fonts" }
 gpui_util = { workspace = true }
 lyon = { version = "1.0", features = ["extra"] }
 rand.workspace = true
@@ -293,6 +303,10 @@ path = "examples/legacy/hello_world.rs"
 [[example]]
 name = "image_loading"
 path = "examples/legacy/image_loading.rs"
+
+[[example]]
+name = "inline_layout"
+path = "examples/legacy/inline_layout.rs"
 
 [[example]]
 name = "layer_shell"

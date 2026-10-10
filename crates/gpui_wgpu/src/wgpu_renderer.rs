@@ -331,6 +331,10 @@ mod tests {
     use super::*;
     use crate::wgpu_renderer::filters::FrameUniformRequirements;
 
+    // Native shader backends can differ slightly when quantizing transcendental math to UNORM8.
+    #[cfg(all(feature = "test-support", not(target_family = "wasm")))]
+    const MAX_CROSS_BACKEND_CHANNEL_DELTA: u8 = 2;
+
     #[cfg(all(feature = "test-support", not(target_family = "wasm")))]
     fn dashed_border_scene(dash_length: f32, dash_gap: f32) -> Scene {
         let full_bounds = Bounds {
@@ -360,6 +364,7 @@ mod tests {
                 bounds,
                 content_mask: gpui::ContentMask {
                     bounds: full_bounds,
+                    ..Default::default()
                 },
                 background: gpui::solid_background(gpui::hsla(0.05, 0.8, 0.45, 1.0)),
                 border_style: gpui::BorderStyle::Dashed,
@@ -501,7 +506,10 @@ mod tests {
             order: 0,
             padding: 0,
             bounds,
-            content_mask: gpui::ContentMask { bounds },
+            content_mask: gpui::ContentMask {
+                bounds,
+                ..Default::default()
+            },
             color: gpui::hsla(0.0, 1.0, 0.5, 0.5).into(),
             thickness: ScaledPixels(1.0),
             wavy: false.into(),
@@ -590,7 +598,10 @@ mod tests {
             scene.insert_primitive(Quad {
                 order: order as u32,
                 bounds,
-                content_mask: gpui::ContentMask { bounds },
+                content_mask: gpui::ContentMask {
+                    bounds,
+                    ..Default::default()
+                },
                 background,
                 ..Default::default()
             });
@@ -606,13 +617,14 @@ mod tests {
         )?;
         let actual = renderer.render_to_image(&scene)?;
         for (index, (actual, expected)) in actual.as_raw().iter().zip(LEGACY).enumerate() {
-            assert_eq!(
-                actual,
-                expected,
-                "legacy mismatch at pixel ({}, {}), channel {}",
+            assert!(
+                actual.abs_diff(*expected) <= MAX_CROSS_BACKEND_CHANNEL_DELTA,
+                "legacy mismatch at pixel ({}, {}), channel {}: got {}, expected {}",
                 (index / 4) % 4,
                 (index / 4) / 4,
-                index % 4
+                index % 4,
+                actual,
+                expected,
             );
         }
         assert_eq!(actual.as_raw().len(), LEGACY.len());
@@ -668,13 +680,19 @@ mod tests {
         for background in backgrounds {
             let filled = render(Quad {
                 bounds,
-                content_mask: gpui::ContentMask { bounds },
+                content_mask: gpui::ContentMask {
+                    bounds,
+                    ..Default::default()
+                },
                 background,
                 ..Default::default()
             })?;
             let bordered = render(Quad {
                 bounds,
-                content_mask: gpui::ContentMask { bounds },
+                content_mask: gpui::ContentMask {
+                    bounds,
+                    ..Default::default()
+                },
                 border_color: background,
                 border_widths: gpui::Edges::all(ScaledPixels(4.0)),
                 ..Default::default()
@@ -687,7 +705,7 @@ mod tests {
                     border_pixel.iter().zip(fill_pixel.iter()).enumerate()
                 {
                     assert!(
-                        border.abs_diff(*fill) <= 1,
+                        border.abs_diff(*fill) <= MAX_CROSS_BACKEND_CHANNEL_DELTA,
                         "border background must sample like a fill at ({x}, {y}), channel {channel}, for {background:?}: got {border_pixel:?}, expected {fill_pixel:?}"
                     );
                 }
@@ -723,7 +741,10 @@ mod tests {
         let mut scene = Scene::default();
         scene.insert_primitive(BackdropFilter {
             bounds,
-            content_mask: gpui::ContentMask { bounds },
+            content_mask: gpui::ContentMask {
+                bounds,
+                ..Default::default()
+            },
             filters: smallvec::smallvec![gpui::ScaledFilter::Blur(ScaledPixels(1.0))],
             opacity: 1.0,
             ..BackdropFilter::default()
@@ -770,6 +791,7 @@ mod tests {
             bounds: full_bounds,
             content_mask: gpui::ContentMask {
                 bounds: full_bounds,
+                ..Default::default()
             },
             background: gpui::solid_background(gpui::hsla(0.0, 0.0, 0.0, 1.0)),
             ..Default::default()
@@ -779,6 +801,7 @@ mod tests {
             bounds: center_bounds,
             content_mask: gpui::ContentMask {
                 bounds: center_bounds,
+                ..Default::default()
             },
             background: gpui::solid_background(gpui::hsla(0.0, 0.0, 1.0, 1.0)),
             ..Default::default()
@@ -788,6 +811,7 @@ mod tests {
             bounds: full_bounds,
             content_mask: gpui::ContentMask {
                 bounds: full_bounds,
+                ..Default::default()
             },
             filters: smallvec::smallvec![gpui::ScaledFilter::Blur(ScaledPixels(2.0))],
             opacity: 1.0,
@@ -844,7 +868,10 @@ mod tests {
             scene.insert_primitive(Quad {
                 order: index * 2,
                 bounds,
-                content_mask: gpui::ContentMask { bounds },
+                content_mask: gpui::ContentMask {
+                    bounds,
+                    ..Default::default()
+                },
                 background: gpui::solid_background(gpui::hsla(0.0, 0.0, 0.0, 1.0)),
                 ..Default::default()
             });
@@ -852,7 +879,10 @@ mod tests {
                 order: index * 2 + 1,
                 padding: 0,
                 bounds,
-                content_mask: gpui::ContentMask { bounds },
+                content_mask: gpui::ContentMask {
+                    bounds,
+                    ..Default::default()
+                },
                 color: gpui::hsla(0.0, 0.0, 1.0, 1.0).into(),
                 thickness: ScaledPixels(1.0),
                 wavy: false.into(),

@@ -277,6 +277,10 @@ pub struct X11WindowState {
     maximized_horizontal: bool,
     visible: bool,
     hidden: bool,
+    /// MDRV: focus intent from `activate()` that could not land yet because
+    /// the window was still unmapped (e.g. re-activating out of an iconic
+    /// state); re-applied on MapNotify by the client.
+    pub(crate) focus_requested: bool,
     active: bool,
     hovered: bool,
     pub(crate) force_render_after_recovery: bool,
@@ -842,6 +846,7 @@ impl X11WindowState {
                 maximized_horizontal: false,
                 visible: params.show,
                 hidden: false,
+                focus_requested: false,
                 appearance,
                 handle,
                 background_appearance: WindowBackgroundAppearance::Opaque,
@@ -1535,6 +1540,20 @@ impl PlatformWindow for X11Window {
                 message,
             )
             .log_err();
+        // MDRV: XSetInputFocus only lands on a viewable window. When this is
+        // called while the window is still iconic/unmapped the request
+        // BadMatches and is silently dropped, leaving the window visible but
+        // keyboard-dead (seen summoning the overlay inside gamescope). Record
+        // the intent; the client re-applies focus when MapNotify arrives.
+        self.0.state.borrow_mut().focus_requested = true;
+        self.0
+            .xcb
+            .set_input_focus(
+                xproto::InputFocus::POINTER_ROOT,
+                self.0.x_window,
+                xproto::Time::CURRENT_TIME,
+            )
+            .log_err();
         xcb_flush(&self.0.xcb);
         true
     }
@@ -1669,6 +1688,10 @@ impl PlatformWindow for X11Window {
     }
 
     fn minimize(&self) {
+        // MDRV: dropping any pending focus intent — a window being hidden
+        // must not steal focus when it is mapped again later. (Runs before
+        // the shared borrow below; a borrow_mut here panicked at startup.)
+        self.0.state.borrow_mut().focus_requested = false;
         let state = self.0.state.borrow();
         const WINDOW_ICONIC_STATE: u32 = 3;
         let message = ClientMessageEvent::new(

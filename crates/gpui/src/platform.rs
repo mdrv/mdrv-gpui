@@ -872,6 +872,14 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn window_bounds(&self) -> WindowBounds;
     fn content_size(&self) -> Size<Pixels>;
     fn resize(&mut self, size: Size<Pixels>);
+
+    /// Move the window so that its top-left corner lands at `origin`, in
+    /// global screen coordinates (top-left of the primary display, y
+    /// pointing down — the same space as [`PlatformDisplay::bounds`]).
+    ///
+    /// No-op on platforms that cannot reposition windows programmatically
+    /// (Wayland layer surfaces move via margins instead).
+    fn set_position(&self, _origin: Point<Pixels>) {}
     fn scale_factor(&self) -> f32;
     fn appearance(&self) -> WindowAppearance;
     fn display(&self) -> Option<Rc<dyn PlatformDisplay>>;
@@ -980,6 +988,16 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn set_exclusive_zone(&self, _zone: Pixels) {}
     #[cfg(all(target_os = "linux", feature = "wayland"))]
     fn set_exclusive_edge(&self, _edge: layer_shell::Anchor) {}
+    /// Linux (wayland layer-shell) only: change keyboard interactivity at
+    /// runtime. `None` gives the keyboard back to the compositor; `OnDemand`
+    /// /`Exclusive` take it again. No-op on other platforms/backends.
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    fn set_keyboard_interactivity(&self, _mode: layer_shell::KeyboardInteractivity) {}
+    /// Linux (wayland layer-shell) only: change this surface's margins at
+    /// runtime, CSS order (top, right, bottom, left). No-op on other
+    /// platforms/backends and for non-layer-shell windows.
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    fn set_margin(&self, _margin: (Pixels, Pixels, Pixels, Pixels)) {}
     fn set_input_region(&self, _region: Option<&[Bounds<Pixels>]>) {}
     fn window_decorations(&self) -> Decorations {
         Decorations::Server
@@ -1004,7 +1022,12 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     /// Returns typed backend-specific GPU context information for custom
     /// controls. The value is intentionally type-erased in this crate so the
     /// core UI crate does not depend on a rendering backend.
-    #[cfg(any(target_family = "wasm", target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(
+        target_family = "wasm",
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "android"
+    ))]
     fn gpu_context_info(&self) -> Option<Box<dyn std::any::Any>> {
         None
     }

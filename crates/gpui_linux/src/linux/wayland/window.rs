@@ -44,7 +44,7 @@ use gpui::{
     PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge, Scene, Size,
     Tiling, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
     WindowControls, WindowDecorations, WindowKind, WindowParams,
-    layer_shell::{Anchor, LayerShellNotSupportedError},
+    layer_shell::{Anchor, KeyboardInteractivity, LayerShellNotSupportedError},
     popup::PopupOptions,
     px, size,
 };
@@ -472,6 +472,19 @@ impl WaylandSurfaceState {
             self
         {
             layer_surface.set_exclusive_zone(zone);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// CSS order (top, right, bottom, left). Returns whether it applied
+    /// (layer-shell surfaces only).
+    fn set_margin(&self, top: i32, right: i32, bottom: i32, left: i32) -> bool {
+        if let WaylandSurfaceState::LayerShell(WaylandLayerSurfaceState { layer_surface, .. }) =
+            self
+        {
+            layer_surface.set_margin(top, right, bottom, left);
             true
         } else {
             false
@@ -1521,36 +1534,50 @@ impl WaylandWindowStatePtr {
     }
 
     pub fn set_size_and_scale(&self, size: Option<Size<Pixels>>, scale: Option<f32>) {
-        let (size, scale) = {
-            let mut state = self.state.borrow_mut();
-            if size.is_none_or(|size| size == state.bounds.size)
-                && scale.is_none_or(|scale| scale == state.scale)
-            {
-                return;
-            }
-            if let Some(size) = size {
-                state.bounds.size = size;
-            }
-            if let Some(scale) = scale {
-                state.scale = scale;
-            }
-            let device_bounds = state.bounds.to_device_pixels(state.scale);
-            state.renderer.update_drawable_size(device_bounds.size);
-            (state.bounds.size, state.scale)
-        };
+        if let Some((size, scale)) = self.apply_size_and_scale(size, scale) {
+            self.fire_resized(size, scale);
+        }
+    }
 
+    /// Updates bounds, scale, the drawable surface and the viewport. Fires no
+    /// callbacks, so it is safe to call from platform code that may itself be
+    /// running inside a gpui update (see `PlatformWindow::resize`).
+    fn apply_size_and_scale(
+        &self,
+        size: Option<Size<Pixels>>,
+        scale: Option<f32>,
+    ) -> Option<(Size<Pixels>, f32)> {
+        let mut state = self.state.borrow_mut();
+        if size.is_none_or(|size| size == state.bounds.size)
+            && scale.is_none_or(|scale| scale == state.scale)
+        {
+            return None;
+        }
+        if let Some(size) = size {
+            state.bounds.size = size;
+        }
+        if let Some(scale) = scale {
+            state.scale = scale;
+        }
+        let device_bounds = state.bounds.to_device_pixels(state.scale);
+        state.renderer.update_drawable_size(device_bounds.size);
+        if let Some(viewport) = &state.viewport {
+            viewport.set_destination(
+                f32::from(state.bounds.size.width) as i32,
+                f32::from(state.bounds.size.height) as i32,
+            );
+        }
+        Some((state.bounds.size, state.scale))
+    }
+
+    /// Fires the registered gpui-core resize callback. This re-enters the App
+    /// (`AsyncApp::update`), which deadlocks if the App is already mid-update
+    /// — call it only from a deferred (spawned) context in that case.
+    fn fire_resized(&self, size: Size<Pixels>, scale: f32) {
         let callback = self.callbacks.borrow_mut().resize.take();
         if let Some(mut fun) = callback {
             fun(size, scale);
             self.callbacks.borrow_mut().resize = Some(fun);
-        }
-
-        {
-            let state = self.state.borrow();
-            if let Some(viewport) = &state.viewport {
-                viewport
-                    .set_destination(f32::from(size.width) as i32, f32::from(size.height) as i32);
-            }
         }
     }
 
@@ -1810,7 +1837,7 @@ impl PlatformWindow for WaylandWindow {
 
     fn resize(&mut self, size: Size<Pixels>) {
         let state = self.borrow();
-        let state_ptr = self.0.clone();
+        let executor = state.globals.executor.clone();
 
         // A popup's placement is the compositor's, so a resize re-runs the positioner and the
         // configure reply drives the buffer resize. Before the first configure the popup is
@@ -1843,18 +1870,34 @@ impl PlatformWindow for WaylandWindow {
         .map(|v| f32::from(v) as i32)
         .map_size(|v| if v <= 0 { 1 } else { v });
 
-        state.surface_state.set_geometry(
-            window_geometry.origin.x,
-            window_geometry.origin.y,
-            window_geometry.size.width,
-            window_geometry.size.height,
-        );
+        // MDRV_PATCHES=0 skips the synchronous geometry application (upstream
+        // deferred it; the trade-off is the one-frame stale-buffer smear that
+        // this patch fixed — see MDRV.md).
+        if mdrv_patches_enabled() {
+            state.surface_state.set_geometry(
+                window_geometry.origin.x,
+                window_geometry.origin.y,
+                window_geometry.size.width,
+                window_geometry.size.height,
+            );
+        }
 
-        state
-            .globals
-            .executor
-            .spawn(async move { state_ptr.resize(size) })
-            .detach();
+        // Apply the client-side resize synchronously so the next present is
+        // size-consistent with the staged layer size above — deferring it let
+        // a commit pair the new size with the old buffer, and the compositor
+        // scaled it for a frame (rounded borders smeared). The gpui-core
+        // resize callback still fires from a spawned task: it re-enters the
+        // App via AsyncApp::update, which deadlocks when called from inside
+        // an update (e.g. our caller is mid-render).
+        drop(state);
+        let state_ptr = self.0.clone();
+        if let Some((size, scale)) = state_ptr.apply_size_and_scale(Some(size), None) {
+            executor
+                .spawn(async move {
+                    state_ptr.fire_resized(size, scale);
+                })
+                .detach();
+        }
     }
 
     fn scale_factor(&self) -> f32 {
@@ -2211,6 +2254,34 @@ impl PlatformWindow for WaylandWindow {
         }
     }
 
+    fn set_margin(&self, margin: (Pixels, Pixels, Pixels, Pixels)) {
+        // Stage only: the change lands with the next presented frame, in the
+        // same commit as any pending size (Window::resize) and the matching
+        // new buffer. Committing here instead would apply a pending size
+        // against the old buffer for a frame — the compositor scales it and
+        // the straight border segments smear between the rounded corners.
+        let state = self.borrow();
+        state.surface_state.set_margin(
+            f32::from(margin.0) as i32,
+            f32::from(margin.1) as i32,
+            f32::from(margin.2) as i32,
+            f32::from(margin.3) as i32,
+        );
+    }
+
+    fn set_keyboard_interactivity(&self, mode: KeyboardInteractivity) {
+        let state = self.borrow();
+        if let WaylandSurfaceState::LayerShell(WaylandLayerSurfaceState { layer_surface, .. }) =
+            &state.surface_state
+        {
+            layer_surface.set_keyboard_interactivity(
+                super::layer_shell::wayland_keyboard_interactivity(mode),
+            );
+            // Commit so it applies immediately instead of at the next frame.
+            state.surface.commit();
+        }
+    }
+
     fn set_input_region(&self, region: Option<&[Bounds<Pixels>]>) {
         let state = self.borrow();
         match region {
@@ -2509,4 +2580,15 @@ fn inset_by_tiling(mut bounds: Bounds<Pixels>, inset: Pixels, tiling: Tiling) ->
     }
 
     bounds
+}
+
+/// MDRV escape hatch: set `MDRV_PATCHES=0` to run upstream behavior for the
+/// fork's behavior patches (see MDRV.md "Fork tooling & CI"). Debug A/B only.
+fn mdrv_patches_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("MDRV_PATCHES")
+            .map(|v| v != "0")
+            .unwrap_or(true)
+    })
 }

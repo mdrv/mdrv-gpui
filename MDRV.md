@@ -277,15 +277,16 @@ path/blur-composite fragments now map once:
 
 ### Text
 
-#### Color-emoji font allowlist (tag `mdrv-gpui-0.0.260925.6`)
+#### Color-emoji font allowlist — RETIRED 2026-10-05 (was tag `mdrv-gpui-0.0.260925.6`)
 
-`check_is_known_emoji_font` in `crates/gpui_wgpu/src/cosmic_text_system.rs` was
-hardcoded to `"NotoColorEmoji"`. Any other CBDT-only color font (Arch's
-`ttf-twemoji`, Apple Color Emoji, Segoe UI Emoji) took the non-emoji
-swash path (`StrikeWith::ExactSize` + outlines) and rendered blank. The
-allowlist now matches `NotoColorEmoji | Twemoji | AppleColorEmoji |
-SegoeUIEmoji`. SVG-in-OT fonts remain unsupported — swash has no `SVG `
-table rasterizer (COLR/CBDT/sbix/outlines only).
+`check_is_known_emoji_font` lived in `crates/gpui_wgpu/src/cosmic_text_system.rs`
+and widened the hardcoded `"NotoColorEmoji"` check to also cover Twemoji,
+Apple Color Emoji and Segoe UI Emoji (upstream took the non-emoji swash
+path for any other CBDT-only font and rendered blank). The 2026-10-05
+upstream sync replaced the cosmic-text stack with Parley and deleted the
+file, so the allowlist retired with it. TODO: re-verify emoji rendering
+under Parley (glyph rasterizers moved to `gpui_ce_parley`); re-home the
+check there if blank Twemoji returns.
 
 ### Android
 
@@ -329,12 +330,12 @@ Consumers: mdrv-gpui-mobile (AndroidPlatformWindow forwards
   dictionary). Also a `User-Agent` note — GH macOS runner logs truncate
   panics identically to local runs.
 - **Escape hatch `MDRV_PATCHES=0`** — at process start, the fork's
-  behavior patches fall back to upstream behavior: the color-emoji
-  allowlist (only `NotoColorEmoji` known, Twemoji renders blank again),
-  the X11 focus re-land after MapNotify, and the synchronous Wayland
-  resize (`set_geometry` in `resize`). Purpose: A/B diagnosis — "is
-  this bug our patch or upstream?" Verified 2026-09-30: mdrv-em with
-  `MDRV_PATCHES=0` shows blank Twemoji, without it renders. Exempt: the
+  behavior patches fall back to upstream behavior: the X11 focus re-land
+  after MapNotify, and the synchronous Wayland resize (`set_geometry` in
+  `resize`). Purpose: A/B diagnosis — "is this bug our patch or
+  upstream?" Verified 2026-09-30: mdrv-em with `MDRV_PATCHES=0` shows
+  blank Twemoji, without it renders. The color-emoji allowlist left the
+  hatch when it retired with the Parley migration (2026-10-05). Exempt: the
   sprite half-texel inset (pure math inside the `wgsl_rs::wgsl`
   -transpiled `mod source` — no runtime env access possible without
   restructuring the shader pipeline; A/B via `git revert 168fb2f3aa` if
@@ -360,6 +361,23 @@ miss fixes (seen 2026-09-29: `260929.2` on the macOS line lacked the
 Windows DWM `.10`/`.11`; resolved by the `260929.3` integration merge).
 
 Full sync procedure: `/x/m/v270/gpui-ce/50-upstream-sync.md`.
+
+### Sync log
+
+- **2026-10-05** — merged upstream `ec5e7808d2..d9623fc2b6` (31 commits)
+  and flattened our 44-commit lineage into 11 topic commits plus the
+  merge (workspace vendor+pins / wayland / x11 / windows / macos / text
+  / android paint-surface / render / ci+style / brand / docs). Upstream
+  highlights: text system rewritten on Parley (new crates
+  `gpui_ce_parley` + `gpui_ce_fonts`, kept under upstream names; our
+  renamed packages wire in via `package =` keys), paint-canvas
+  implementation removed upstream (our Android paint-surface survived as
+  a cfg union in `elements/surface.rs`), macOS wgpu renderer, Vulkan
+  swapchain recovery (`wgpu_renderer/platform.rs` — the PERF HUD moved
+  inside the `rendered` branch), window background, clip fade, fluent
+  `WindowOptions` builders, Subsecond hot patching. Emoji allowlist
+  retired (see Text). All `--all-targets` checks green; example/test
+  idents remapped (`direction.rs`, `switch.rs`, `parley_render.rs`).
 
 ## Consumers
 

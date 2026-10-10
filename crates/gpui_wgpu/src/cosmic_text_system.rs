@@ -1046,9 +1046,26 @@ fn face_info_into_properties(
     }
 }
 
+/// MDRV escape hatch: set `MDRV_PATCHES=0` to run upstream behavior for the
+/// fork's behavior patches (see MDRV.md "Fork tooling & CI"). Debug A/B only.
+fn mdrv_patches_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("MDRV_PATCHES")
+            .map(|v| v != "0")
+            .unwrap_or(true)
+    })
+}
+
 fn check_is_known_emoji_font(postscript_name: &str) -> bool {
     // TODO: Include other common emoji fonts
-    postscript_name == "NotoColorEmoji"
+    if !mdrv_patches_enabled() {
+        return postscript_name == "NotoColorEmoji";
+    }
+    matches!(
+        postscript_name,
+        "NotoColorEmoji" | "Twemoji" | "AppleColorEmoji" | "SegoeUIEmoji"
+    )
 }
 
 #[cfg(test)]

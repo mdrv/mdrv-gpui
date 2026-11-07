@@ -71,6 +71,34 @@ which CI runs via `just test`).
 
 ## Patches
 
+### File registry
+
+`script/check-upstream` enforces that every file differing from the
+upstream merge-base is named here. Registry (full paths, post-0.270.2
+merge surface):
+
+- `assets/readme/banner.png` — deleted with the README overhaul.
+- `crates/gpui/src/color.rs` — additive schemars shims alongside upstream's `ColorExt`.
+- `crates/gpui/src/elements/div.rs` — `HoverListenerMode` no-op compat shim (touch-first platforms).
+- `crates/gpui_elements/examples/switch.rs` — crate-rename ident fix.
+- `crates/gpui_platform/tests/parley_render.rs` — crate-rename ident fix.
+- `crates/gpui_render/src/shaders/filters.rs` — render-scale/scene-space plumbing.
+- `crates/gpui_render/src/shaders/interface.rs` — `GlobalUniforms` gains `surface_size`.
+- `crates/gpui_render/src/shaders/paths.rs` — scene-space fragment coordinates.
+- `crates/gpui_render/src/shaders/quads.rs` — quad plain-fill fast-path (+fade guard).
+- `crates/gpui_render/src/shaders/shadows.rs` — scene-space fragment coordinates.
+- `crates/gpui_wgpu/src/gpui_wgpu.rs` — render-scale knob API surface.
+- `crates/gpui_wgpu/src/wgpu_renderer.rs` — render-scale plumbing, headless scale handling.
+- `crates/gpui_wgpu/src/wgpu_renderer/drawing.rs` — render-scale plumbing.
+- `crates/gpui_wgpu/src/wgpu_renderer/filters.rs` — scene-space fragment coordinates.
+- `crates/gpui_wgpu/src/wgpu_renderer/frame.rs` — render-scale + `surface_size` uniforms.
+- `crates/gpui_wgpu/src/wgpu_renderer/platform.rs` — PERF HUD statics (`crate::perf::*`).
+- `crates/gpui_wgpu/src/wgpu_renderer/settings.rs` — render-scale setting (atomic).
+- `crates/gpui_windows/src/directx_renderer.rs` — render-scale plumbing.
+
+Mechanically exempted by the guard: `Cargo.{toml,lock}`, `README.md`,
+`MDRV.md`, `vendor/`, `.github/`.
+
 ### Linux (Wayland + X11)
 
 #### `Window::set_keyboard_interactivity` (wayland layer-shell)

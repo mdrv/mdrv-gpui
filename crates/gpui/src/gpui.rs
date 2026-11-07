@@ -49,6 +49,7 @@ pub mod profiler;
 ))]
 #[expect(missing_docs)]
 pub mod queue;
+mod resize;
 mod scene;
 mod shared_uri;
 mod spring;
@@ -115,6 +116,7 @@ pub use gpui_macros::{
     AppContext, InteractiveElement, IntoElement, ParentElement, Render, StatefulInteractiveElement,
     Styled, VisualContext, bench, property_test, register_action, test,
 };
+pub use resize::*;
 pub use spring::*;
 
 /// Defines a Criterion benchmark group for benchmarks annotated with [`gpui::bench`].
@@ -172,7 +174,7 @@ pub use taffy::{AvailableSpace, LayoutId};
 pub use test::*;
 pub use text_system::*;
 pub use transition::*;
-pub use util::{FutureExt, Timeout};
+pub use util::{FutureExt, TextRangeExt, Timeout};
 pub use view::*;
 pub use window::*;
 

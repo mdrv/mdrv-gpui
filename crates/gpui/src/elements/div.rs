@@ -15,6 +15,9 @@
 //! and Tailwind-like styling that you can use to build your own custom elements. Div is
 //! constructed by combining these two systems into an all-in-one element.
 
+#[cfg(debug_assertions)]
+use crate::{PaintQuad, TextAlign};
+
 #[cfg(test)]
 use crate::{
     AnyWindowHandle, Context, HighlightStyle, InputEvent, Keystroke, StyledText, TestAppContext,
@@ -31,9 +34,9 @@ use crate::{
     IntoElement, IsZero, KeyContext, KeyDownEvent, KeyUpEvent, KeyboardButton, KeyboardClickEvent,
     LayoutId, ModifiersChangedEvent, MouseButton, MouseClickEvent, MouseDownEvent, MouseExitEvent,
     MouseMoveEvent, MousePressureEvent, MouseUpEvent, OngoingScroll, Overflow, ParentElement,
-    PinchEvent, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, Style,
-    StyleRefinement, StyleTransitionContext, StyleTransitionState, StyleTransitions, Styled, Task,
-    TooltipId, Visibility, Window, WindowControlArea, point, px, size,
+    PinchEvent, Pixels, Point, PointerChangeCause, Render, ScrollWheelEvent, SharedString, Size,
+    Style, StyleRefinement, StyleTransitionContext, StyleTransitionState, StyleTransitions, Styled,
+    Task, TooltipId, Visibility, Window, WindowControlArea, point, px, size,
 };
 use collections::HashMap;
 use gpui_util::ResultExt;
@@ -789,7 +792,39 @@ impl Interactivity {
     where
         Self: Sized,
     {
-        self.hover_listeners.push(Rc::new(listener));
+        self.on_hover_region(
+            |_, _| Some(()),
+            move |value, window, cx| listener(&value.is_some(), window, cx),
+        );
+    }
+
+    /// Resolves this element's cursor from pointer position and bounds.
+    /// Return `None` to defer to another cursor request.
+    pub fn cursor_with(
+        &mut self,
+        resolver: impl Fn(Point<Pixels>, Bounds<Pixels>) -> Option<CursorStyle> + 'static,
+    ) where
+        Self: Sized,
+    {
+        self.cursor_style_resolver = Some(Rc::new(resolver));
+    }
+
+    /// Calls `listener` when the projected pointer value changes.
+    /// The projection receives window coordinates and element bounds; return `None` outside active regions.
+    /// Layout changes and occlusion are observed independently of event propagation.
+    /// Keep listener order stable across renders.
+    pub fn on_hover_region<R: PartialEq + 'static>(
+        &mut self,
+        project: impl Fn(Point<Pixels>, Bounds<Pixels>) -> Option<R> + 'static,
+        listener: impl Fn(&Option<R>, &mut Window, &mut App) + 'static,
+    ) where
+        Self: Sized,
+    {
+        self.hover_region_listeners
+            .push(Box::new(TypedHoverRegionListener {
+                project: Rc::new(project),
+                callback: Rc::new(listener),
+            }));
     }
 
     /// Use the given callback to construct a new tooltip view when the mouse hovers over this element.
@@ -882,6 +917,23 @@ pub trait InteractiveElement: Sized {
     /// Retrieve the interactivity state associated with this element
     fn interactivity(&mut self) -> &mut Interactivity;
 
+    /// Disable this element's event callbacks and report its disabled state to assistive technology.
+    fn disabled(mut self, disabled: bool) -> Self {
+        let interactivity = self.interactivity();
+        interactivity.disabled = disabled;
+        interactivity.aria.disabled = Some(disabled);
+
+        self
+    }
+
+    /// Apply the given style when this element is disabled.
+    /// Disabled styles take precedence over other interaction styles.
+    fn disabled_style(mut self, style: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
+        self.interactivity().disabled_style = Some(Box::new(style(StyleRefinement::default())));
+
+        self
+    }
+
     /// Builds transition configuration and animates changes to its style properties.
     ///
     /// An explicit [`.id()`](Self::id) should be used for repeated elements built
@@ -967,7 +1019,7 @@ pub trait InteractiveElement: Sized {
     }
 
     /// Apply the given style to this element when the mouse hovers over it
-    fn hover(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
+    fn hover_style(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
         debug_assert!(
             self.interactivity().hover_style.is_none(),
             "hover style already set"
@@ -976,8 +1028,14 @@ pub trait InteractiveElement: Sized {
         self
     }
 
+    /// Apply the given style to this element when the mouse hovers over it
+    #[deprecated(note = "Use InteractiveElement::hover_style instead.")]
+    fn hover(self, style: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
+        self.hover_style(style)
+    }
+
     /// Apply the given style to this element when the mouse hovers over a group member
-    fn group_hover(
+    fn group_hover_style(
         mut self,
         group_name: impl Into<SharedString>,
         f: impl FnOnce(StyleRefinement) -> StyleRefinement,
@@ -987,6 +1045,16 @@ pub trait InteractiveElement: Sized {
             style: Box::new(f(StyleRefinement::default())),
         });
         self
+    }
+
+    /// Apply the given style to this element when the mouse hovers over a group member
+    #[deprecated(note = "Use InteractiveElement::group_hover_style instead.")]
+    fn group_hover(
+        self,
+        group_name: impl Into<SharedString>,
+        style: impl FnOnce(StyleRefinement) -> StyleRefinement,
+    ) -> Self {
+        self.group_hover_style(group_name, style)
     }
 
     /// Bind the given callback to the mouse down event for the given mouse button.
@@ -1331,8 +1399,8 @@ pub trait InteractiveElement: Sized {
         self
     }
 
-    /// DEPRECATED: use [`on_drag_over`].
     /// Apply the given style when the given data type is dragged over this element
+    #[deprecated(note = "use [`on_drag_over`]")]
     fn drag_over<S: 'static>(
         mut self,
         f: impl 'static + Fn(StyleRefinement, &S, &mut Window, &mut App) -> StyleRefinement,
@@ -1381,7 +1449,7 @@ pub trait InteractiveElement: Sized {
     }
 
     /// Apply the given style when the given data type is dragged over this element's group
-    fn group_drag_over<S: 'static>(
+    fn group_drag_over_style<S: 'static>(
         mut self,
         group_name: impl Into<SharedString>,
         f: impl FnOnce(StyleRefinement) -> StyleRefinement,
@@ -1394,6 +1462,16 @@ pub trait InteractiveElement: Sized {
             },
         ));
         self
+    }
+
+    /// Apply the given style when the given data type is dragged over this element's group
+    #[deprecated(note = "Use InteractiveElement::group_drag_over_style instead.")]
+    fn group_drag_over<Drag: 'static>(
+        self,
+        group_name: impl Into<SharedString>,
+        style: impl FnOnce(StyleRefinement) -> StyleRefinement,
+    ) -> Self {
+        self.group_drag_over_style::<Drag>(group_name, style)
     }
 
     /// Bind the given callback to drop events of the given type, whether or not the drag started on this element.
@@ -1456,7 +1534,7 @@ pub trait InteractiveElement: Sized {
 
     /// Set the given styles to be applied when this element, specifically, is focused.
     /// Requires that the element is focusable. Elements can be made focusable using [`InteractiveElement::track_focus`].
-    fn focus(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self
+    fn focus_style(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self
     where
         Self: Sized,
     {
@@ -1464,9 +1542,16 @@ pub trait InteractiveElement: Sized {
         self
     }
 
+    /// Set the given styles to be applied when this element, specifically, is focused.
+    /// Requires that the element is focusable. Elements can be made focusable using [`InteractiveElement::track_focus`].
+    #[deprecated(note = "Use InteractiveElement::focus_style instead.")]
+    fn focus(self, style: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
+        self.focus_style(style)
+    }
+
     /// Set the given styles to be applied when this element is inside another element that is focused.
     /// Requires that the element is focusable. Elements can be made focusable using [`InteractiveElement::track_focus`].
-    fn in_focus(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self
+    fn in_focus_style(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self
     where
         Self: Sized,
     {
@@ -1474,15 +1559,44 @@ pub trait InteractiveElement: Sized {
         self
     }
 
+    /// Set the given styles to be applied when this element is inside another element that is focused.
+    /// Requires that the element is focusable. Elements can be made focusable using [`InteractiveElement::track_focus`].
+    #[deprecated(note = "Use InteractiveElement::in_focus_style instead.")]
+    fn in_focus(self, style: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
+        self.in_focus_style(style)
+    }
+
     /// Set the given styles to be applied when this element is focused via keyboard navigation.
     /// This is similar to CSS's `:focus-visible` pseudo-class - it only applies when the element
     /// is focused AND the user is navigating via keyboard (not mouse clicks).
     /// Requires that the element is focusable. Elements can be made focusable using [`InteractiveElement::track_focus`].
-    fn focus_visible(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self
+    fn focus_visible_style(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self
     where
         Self: Sized,
     {
         self.interactivity().focus_visible_style = Some(Box::new(f(StyleRefinement::default())));
+        self
+    }
+
+    /// Set the given styles to be applied when this element is focused via keyboard navigation.
+    /// This is similar to CSS's `:focus-visible` pseudo-class - it only applies when the element
+    /// is focused AND the user is navigating via keyboard (not mouse clicks).
+    /// Requires that the element is focusable. Elements can be made focusable using [`InteractiveElement::track_focus`].
+    #[deprecated(note = "Use InteractiveElement::focus_visible_style instead.")]
+    fn focus_visible(self, style: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
+        self.focus_visible_style(style)
+    }
+
+    /// Resolves this element's cursor from pointer position and bounds.
+    /// Return `None` to defer to another cursor request.
+    fn cursor_with(
+        mut self,
+        resolver: impl Fn(Point<Pixels>, Bounds<Pixels>) -> Option<CursorStyle> + 'static,
+    ) -> Self
+    where
+        Self: Sized,
+    {
+        self.interactivity().cursor_with(resolver);
         self
     }
 }
@@ -1603,8 +1717,8 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
-    /// Set whether this element disallows input, e.g. a disabled control or a
-    /// disabled group of controls (maps to AccessKit's `Disabled` flag).
+    /// Set the disabled state exposed to assistive technology, using AccessKit's `Disabled` flag.
+    /// Use [`InteractiveElement::disabled`] to also suppress event callbacks.
     fn aria_disabled(mut self, disabled: bool) -> Self {
         self.interactivity().aria.disabled = Some(disabled);
         self
@@ -1783,7 +1897,7 @@ pub trait StatefulInteractiveElement: InteractiveElement {
     }
 
     /// Set the given styles to be applied when this element is active.
-    fn active(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self
+    fn active_style(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self
     where
         Self: Sized,
     {
@@ -1791,8 +1905,14 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Set the given styles to be applied when this element is active.
+    #[deprecated(note = "Use StatefulInteractiveElement::active_style instead.")]
+    fn active(self, style: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
+        self.active_style(style)
+    }
+
     /// Set the given styles to be applied when this element's group is active.
-    fn group_active(
+    fn group_active_style(
         mut self,
         group_name: impl Into<SharedString>,
         f: impl FnOnce(StyleRefinement) -> StyleRefinement,
@@ -1805,6 +1925,16 @@ pub trait StatefulInteractiveElement: InteractiveElement {
             style: Box::new(f(StyleRefinement::default())),
         });
         self
+    }
+
+    /// Set the given styles to be applied when this element's group is active.
+    #[deprecated(note = "Use StatefulInteractiveElement::group_active_style instead.")]
+    fn group_active(
+        self,
+        group_name: impl Into<SharedString>,
+        style: impl FnOnce(StyleRefinement) -> StyleRefinement,
+    ) -> Self {
+        self.group_active_style(group_name, style)
     }
 
     /// Bind the given callback to click events of this element.
@@ -1904,6 +2034,19 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Calls the listener when a typed pointer projection changes.
+    fn on_hover_region<R: PartialEq + 'static>(
+        mut self,
+        project: impl Fn(Point<Pixels>, Bounds<Pixels>) -> Option<R> + 'static,
+        listener: impl Fn(&Option<R>, &mut Window, &mut App) + 'static,
+    ) -> Self
+    where
+        Self: Sized,
+    {
+        self.interactivity().on_hover_region(project, listener);
+        self
+    }
+
     /// Use the given callback to construct a new tooltip view when the mouse hovers over this element.
     /// The fluent API equivalent to [`Interactivity::tooltip`].
     fn tooltip(mut self, build_tooltip: impl Fn(&mut Window, &mut App) -> AnyView + 'static) -> Self
@@ -1983,7 +2126,50 @@ pub(crate) type PinchListener =
     Box<dyn Fn(&PinchEvent, DispatchPhase, &Hitbox, &mut Window, &mut App) + 'static>;
 
 pub(crate) type ClickListener = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
-pub(crate) type HoverListener = Rc<dyn Fn(&bool, &mut Window, &mut App) + 'static>;
+type PointerProjector<R> = Rc<dyn Fn(Point<Pixels>, Bounds<Pixels>) -> Option<R>>;
+pub(crate) type CursorStyleResolver = PointerProjector<CursorStyle>;
+type HoverRegionCallback<R> = Rc<dyn Fn(&Option<R>, &mut Window, &mut App)>;
+type HoverRegionObserver = Rc<dyn Fn(Option<Point<Pixels>>, Bounds<Pixels>, &mut Window, &mut App)>;
+
+/// Erases only the stored region type.
+#[derive(Default)]
+pub(crate) struct HoverRegionState(Option<Rc<dyn Any>>);
+
+pub(crate) trait HoverRegionListener {
+    fn bind(&self, state: &mut HoverRegionState) -> HoverRegionObserver;
+}
+
+struct TypedHoverRegionListener<R> {
+    project: PointerProjector<R>,
+    callback: HoverRegionCallback<R>,
+}
+
+impl<R: PartialEq + 'static> HoverRegionListener for TypedHoverRegionListener<R> {
+    fn bind(&self, state: &mut HoverRegionState) -> HoverRegionObserver {
+        // Reset state if this registration changes type.
+        let value = state
+            .0
+            .as_ref()
+            .and_then(|state| state.clone().downcast::<RefCell<Rc<Option<R>>>>().ok())
+            .unwrap_or_else(|| Rc::new(RefCell::new(Rc::new(None))));
+        state.0 = Some(value.clone());
+        let project = self.project.clone();
+        let callback = self.callback.clone();
+        Rc::new(move |position, bounds, window, cx| {
+            let next = position.and_then(|position| project(position, bounds));
+            let mut previous = value.borrow_mut();
+            if **previous == next {
+                return;
+            }
+            let next = Rc::new(next);
+            *previous = next.clone();
+            // Release the borrow before callbacks can redraw or dispatch input.
+            // Keep this snapshot alive across reentrant updates.
+            drop(previous);
+            callback(&next, window, cx);
+        })
+    }
+}
 
 pub(crate) type DragListener =
     Box<dyn Fn(Point<Pixels>, Option<CursorStyle>, &mut Window, &mut App) -> AnyDrag + 'static>;
@@ -2617,6 +2803,7 @@ pub struct Interactivity {
     pub(crate) content_size: Size<Pixels>,
     pub(crate) key_context: Option<KeyContext>,
     pub(crate) focusable: bool,
+    pub(crate) disabled: bool,
     pub(crate) tracked_focus_handle: Option<FocusHandle>,
     pub(crate) tracked_scroll_handle: Option<ScrollHandle>,
     pub(crate) scroll_anchor: Option<ScrollAnchor>,
@@ -2627,6 +2814,7 @@ pub struct Interactivity {
     /// by focus, active, etc.
     pub base_style: Box<StyleRefinement>,
     pub(crate) style_transitions: Option<Box<StyleTransitions>>,
+    pub(crate) disabled_style: Option<Box<StyleRefinement>>,
     pub(crate) focus_style: Option<Box<StyleRefinement>>,
     pub(crate) in_focus_style: Option<Box<StyleRefinement>>,
     pub(crate) focus_visible_style: Option<Box<StyleRefinement>>,
@@ -2654,7 +2842,9 @@ pub struct Interactivity {
     pub(crate) click_listeners: Vec<ClickListener>,
     pub(crate) aux_click_listeners: Vec<ClickListener>,
     pub(crate) drag_listener: Option<DragListener>,
-    pub(crate) hover_listeners: Vec<HoverListener>,
+    pub(crate) hover_region_listeners: Vec<Box<dyn HoverRegionListener>>,
+    /// Resolves a cursor from the current pointer position and this element's bounds.
+    pub(crate) cursor_style_resolver: Option<CursorStyleResolver>,
     pub(crate) tooltip_builder: Option<TooltipBuilder>,
     pub(crate) tooltip_show_delay: Option<Duration>,
     pub(crate) window_control: Option<WindowControlArea>,
@@ -2927,12 +3117,13 @@ impl Interactivity {
         self.hitbox_behavior != HitboxBehavior::Normal
             || self.window_control.is_some()
             || style.mouse_cursor.is_some()
+            || self.cursor_style_resolver.is_some()
             || self.group.is_some()
             || self.scroll_offset.is_some()
             || self.tracked_focus_handle.is_some()
             || self.hover_style.is_some()
             || self.group_hover_style.is_some()
-            || !self.hover_listeners.is_empty()
+            || !self.hover_region_listeners.is_empty()
             || !self.mouse_up_listeners.is_empty()
             || !self.mouse_pressure_listeners.is_empty()
             || !self.mouse_down_listeners.is_empty()
@@ -3047,6 +3238,12 @@ impl Interactivity {
                     cx,
                 );
 
+                if let Some(state) = element_state.as_mut() {
+                    state
+                        .hover_region_states
+                        .truncate(self.hover_region_listeners.len());
+                }
+
                 #[cfg(any(feature = "test-support", test))]
                 if let Some(debug_selector) = &self.debug_selector {
                     window
@@ -3061,102 +3258,95 @@ impl Interactivity {
                     return ((), element_state);
                 }
 
-                let mut tab_group = None;
-                if self.tab_group {
-                    tab_group = self.tab_index;
-                }
+                let tab_group = self.tab_group.then_some(self.tab_index).flatten();
 
-                window.with_element_opacity(style.opacity, |window| {
-                    style.paint(bounds, window, cx, |window: &mut Window, cx: &mut App| {
-                        window.with_text_style(style.text_style().cloned(), |window| {
-                            window.with_content_mask(
-                                style.overflow_mask(bounds, window.rem_size()),
-                                |window| {
-                                    window.with_tab_group(tab_group, |window| {
-                                        // Register the container's own focus handle *inside* its
-                                        // tab group, so that focusing the container and then
-                                        // calling `focus_next` descends into this group's first
-                                        // item. Inserting it before `with_tab_group` would give the
-                                        // container a shallower tab path than its children; with
-                                        // sibling groups every container would then sort ahead of
-                                        // every item, and `focus_next` from a container would jump
-                                        // to the first item in the whole window instead of its own.
-                                        if let Some(focus_handle) = &self.tracked_focus_handle {
-                                            window.next_frame.tab_stops.insert(focus_handle);
-                                        }
-                                        if let Some(hitbox) = hitbox {
-                                            #[cfg(debug_assertions)]
-                                            self.paint_debug_info(
-                                                global_id, hitbox, &style, window, cx,
-                                            );
+                let paint_content = |window: &mut Window, cx: &mut App| {
+                    // Register the container inside its tab group so `focus_next` enters
+                    // its own children. Outside the group, it would sort ahead of the
+                    // items in every sibling group and enter the first group instead.
+                    if let Some(focus_handle) = &self.tracked_focus_handle {
+                        window.next_frame.tab_stops.insert(focus_handle);
+                    }
 
-                                            if let Some(drag) = cx.active_drag.as_ref() {
-                                                if let Some(mouse_cursor) = drag.cursor_style {
-                                                    window.set_window_cursor_style(mouse_cursor);
-                                                }
-                                            } else {
-                                                if let Some(mouse_cursor) = style.mouse_cursor {
-                                                    window.set_cursor_style(mouse_cursor, hitbox);
-                                                }
-                                            }
+                    if let Some(hitbox) = hitbox {
+                        #[cfg(debug_assertions)]
+                        self.paint_debug_info(global_id, hitbox, &style, window, cx);
 
-                                            if let Some(group) = self.group.clone() {
-                                                GroupHitboxes::push(group, hitbox.id, cx);
-                                            }
+                        if let Some(drag) = cx.active_drag.as_ref() {
+                            if let Some(mouse_cursor) = drag.cursor_style {
+                                window.set_window_cursor_style(mouse_cursor);
+                            }
+                        } else {
+                            if let Some(mouse_cursor) = style.mouse_cursor {
+                                window.set_cursor_style(mouse_cursor, hitbox);
+                            }
 
-                                            if let Some(area) = self.window_control {
-                                                window.insert_window_control_hitbox(
-                                                    area,
-                                                    hitbox.clone(),
-                                                );
-                                            }
+                            if let Some(resolve_cursor) = self.cursor_style_resolver.clone() {
+                                window.set_cursor_style_with(hitbox, move |position| {
+                                    resolve_cursor(position, bounds)
+                                });
+                            }
+                        }
 
-                                            self.paint_mouse_listeners(
-                                                hitbox,
-                                                element_state.as_mut(),
-                                                window,
-                                                cx,
-                                            );
-                                            self.paint_scroll_listener(hitbox, &style, window, cx);
-                                        }
+                        if let Some(group) = self.group.clone() {
+                            GroupHitboxes::push(group, hitbox.id, cx);
+                        }
 
-                                        self.paint_keyboard_listeners(window, cx);
+                        if let Some(area) = self.window_control {
+                            window.insert_window_control_hitbox(area, hitbox.clone());
+                        }
 
-                                        if window.a11y.is_active() {
-                                            if let Some(global_id) = global_id {
-                                                if !self.a11y_action_listeners.is_empty() {
-                                                    let node_id = global_id.accesskit_node_id();
-                                                    for (action, listener) in
-                                                        self.a11y_action_listeners.drain(..)
-                                                    {
-                                                        window.on_a11y_action(
-                                                            node_id, action, listener,
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                        }
+                        self.paint_mouse_listeners(hitbox, element_state.as_mut(), window, cx);
+                        self.paint_scroll_listener(hitbox, &style, window, cx);
+                    }
 
-                                        f(&style, window, cx);
+                    self.paint_keyboard_listeners(window, cx);
 
-                                        if let Some(_hitbox) = hitbox {
-                                            #[cfg(any(feature = "inspector", debug_assertions))]
-                                            window.insert_inspector_hitbox(
-                                                _hitbox.id,
-                                                _inspector_id,
-                                                cx,
-                                            );
+                    if window.a11y.is_active()
+                        && let Some(global_id) = global_id
+                        && !self.a11y_action_listeners.is_empty()
+                    {
+                        let node_id = global_id.accesskit_node_id();
 
-                                            if let Some(group) = self.group.as_ref() {
-                                                GroupHitboxes::pop(group, cx);
-                                            }
-                                        }
-                                    })
-                                },
-                            );
-                        });
+                        for (action, listener) in self.a11y_action_listeners.drain(..) {
+                            if self.disabled {
+                                continue;
+                            }
+
+                            window.on_a11y_action(node_id, action, listener);
+                        }
+                    }
+
+                    f(&style, window, cx);
+
+                    if let Some(_hitbox) = hitbox {
+                        #[cfg(any(feature = "inspector", debug_assertions))]
+                        window.insert_inspector_hitbox(_hitbox.id, _inspector_id, cx);
+
+                        if let Some(group) = self.group.as_ref() {
+                            GroupHitboxes::pop(group, cx);
+                        }
+                    }
+                };
+
+                let paint_tab_group = |window: &mut Window, cx: &mut App| {
+                    window.with_tab_group(tab_group, |window| paint_content(window, cx));
+                };
+
+                let paint_content_mask = |window: &mut Window, cx: &mut App| {
+                    window.with_content_mask(
+                        style.overflow_mask(bounds, window.rem_size()),
+                        |window| paint_tab_group(window, cx),
+                    );
+                };
+
+                let paint_text_style = |window: &mut Window, cx: &mut App| {
+                    window.with_text_style(style.text_style().cloned(), |window| {
+                        paint_content_mask(window, cx);
                     });
-                });
+                };
+
+                style.paint(bounds, window, cx, paint_text_style);
 
                 ((), element_state)
             },
@@ -3172,8 +3362,6 @@ impl Interactivity {
         window: &mut Window,
         cx: &mut App,
     ) {
-        use crate::{BorderStyle, TextAlign};
-
         if let Some(global_id) = global_id
             && (style.debug || style.debug_below || cx.has_global::<crate::DebugBelow>())
             && hitbox.is_hovered(window)
@@ -3251,18 +3439,18 @@ impl Interactivity {
                                 }
                             }
                         });
-                        window.paint_quad(crate::outline(
-                            crate::Bounds {
+                        window.paint_quad(
+                            PaintQuad::new(crate::Bounds {
                                 origin: hitbox.origin
                                     + crate::point(crate::px(0.), FONT_SIZE - px(2.)),
                                 size: crate::Size {
                                     width: text_bounds.size.width,
                                     height: crate::px(1.),
                                 },
-                            },
-                            crate::red(),
-                            BorderStyle::default(),
-                        ))
+                            })
+                            .border_widths(px(1.))
+                            .border_color(crate::red()),
+                        )
                     }
                 }
             };
@@ -3296,6 +3484,8 @@ impl Interactivity {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let disabled = self.disabled;
+
         let is_focused = self
             .tracked_focus_handle
             .as_ref()
@@ -3323,6 +3513,10 @@ impl Interactivity {
         for listener in self.mouse_down_listeners.drain(..) {
             let hitbox = hitbox.clone();
             window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+                if disabled {
+                    return;
+                }
+
                 listener(event, phase, &hitbox, window, cx);
             })
         }
@@ -3330,6 +3524,10 @@ impl Interactivity {
         for listener in self.mouse_up_listeners.drain(..) {
             let hitbox = hitbox.clone();
             window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
+                if disabled {
+                    return;
+                }
+
                 listener(event, phase, &hitbox, window, cx);
             })
         }
@@ -3337,6 +3535,10 @@ impl Interactivity {
         for listener in self.mouse_pressure_listeners.drain(..) {
             let hitbox = hitbox.clone();
             window.on_mouse_event(move |event: &MousePressureEvent, phase, window, cx| {
+                if disabled {
+                    return;
+                }
+
                 listener(event, phase, &hitbox, window, cx);
             })
         }
@@ -3344,6 +3546,10 @@ impl Interactivity {
         for listener in self.mouse_move_listeners.drain(..) {
             let hitbox = hitbox.clone();
             window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                if disabled {
+                    return;
+                }
+
                 listener(event, phase, &hitbox, window, cx);
             })
         }
@@ -3351,6 +3557,10 @@ impl Interactivity {
         for listener in self.mouse_exit_listeners.drain(..) {
             let hitbox = hitbox.clone();
             window.on_mouse_event(move |event: &MouseExitEvent, phase, window, cx| {
+                if disabled {
+                    return;
+                }
+
                 listener(event, phase, &hitbox, window, cx);
             })
         }
@@ -3358,6 +3568,10 @@ impl Interactivity {
         for listener in self.scroll_wheel_listeners.drain(..) {
             let hitbox = hitbox.clone();
             window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
+                if disabled {
+                    return;
+                }
+
                 listener(event, phase, &hitbox, window, cx);
             })
         }
@@ -3365,6 +3579,10 @@ impl Interactivity {
         for listener in self.pinch_listeners.drain(..) {
             let hitbox = hitbox.clone();
             window.on_mouse_event(move |event: &PinchEvent, phase, window, cx| {
+                if disabled {
+                    return;
+                }
+
                 listener(event, phase, &hitbox, window, cx);
             })
         }
@@ -3431,6 +3649,10 @@ impl Interactivity {
             let hitbox = hitbox.clone();
             window.on_mouse_event({
                 move |evt: &MouseUpEvent, phase, window, cx| {
+                    if disabled {
+                        return;
+                    }
+
                     if !phase.bubble() {
                         return;
                     }
@@ -3508,6 +3730,10 @@ impl Interactivity {
                     let hitbox = hitbox.clone();
                     let has_aux_click_listeners = !aux_click_listeners.is_empty();
                     move |event: &MouseDownEvent, phase, window, _cx| {
+                        if disabled {
+                            return;
+                        }
+
                         if phase == DispatchPhase::Bubble
                             && (event.button == MouseButton::Left || has_aux_click_listeners)
                             && hitbox.is_hovered(window)
@@ -3522,6 +3748,10 @@ impl Interactivity {
                     let pending_mouse_down = pending_mouse_down.clone();
                     let hitbox = hitbox.clone();
                     move |event: &MouseMoveEvent, phase, window, cx| {
+                        if disabled {
+                            return;
+                        }
+
                         if phase == DispatchPhase::Capture || drag_listener.is_none() {
                             return;
                         }
@@ -3561,6 +3791,10 @@ impl Interactivity {
                     window.on_key_event({
                         let pending_keyboard_down = pending_keyboard_down.clone();
                         move |event: &KeyDownEvent, phase, window, _cx| {
+                            if disabled {
+                                return;
+                            }
+
                             if phase.bubble() && !window.default_prevented() {
                                 let stroke = &event.keystroke;
                                 let is_activation_key = (stroke.key.eq("enter")
@@ -3577,6 +3811,10 @@ impl Interactivity {
                         let click_listeners = click_listeners.clone();
                         let hitbox = hitbox.clone();
                         move |event: &KeyUpEvent, phase, window, cx| {
+                            if disabled {
+                                return;
+                            }
+
                             if phase.bubble() && !window.default_prevented() {
                                 let stroke = &event.keystroke;
                                 let keyboard_button = if stroke.key.eq("enter") {
@@ -3618,44 +3856,50 @@ impl Interactivity {
                 window.on_mouse_event({
                     let mut captured_mouse_down = None;
                     let hitbox = hitbox.clone();
-                    move |event: &MouseUpEvent, phase, window, cx| match phase {
-                        // Clear the pending mouse down during the capture phase,
-                        // so that it happens even if another event handler stops
-                        // propagation.
-                        DispatchPhase::Capture => {
-                            let mut pending_mouse_down = pending_mouse_down.borrow_mut();
-                            if pending_mouse_down.is_some() && hitbox.is_hovered(window) {
-                                captured_mouse_down = pending_mouse_down.take();
-                                window.refresh();
-                            } else if pending_mouse_down.is_some() {
-                                // Clear the pending mouse down event (without firing click handlers)
-                                // if the hitbox is not being hovered.
-                                // This avoids dragging elements that changed their position
-                                // immediately after being clicked.
-                                // See https://github.com/zed-industries/zed/issues/24600 for more details
-                                pending_mouse_down.take();
-                                window.refresh();
-                            }
+                    move |event: &MouseUpEvent, phase, window, cx| {
+                        if disabled {
+                            return;
                         }
-                        // Fire click handlers during the bubble phase.
-                        DispatchPhase::Bubble => {
-                            if let Some(mouse_down) = captured_mouse_down.take() {
-                                let btn = mouse_down.button;
 
-                                let mouse_click = ClickEvent::Mouse(MouseClickEvent {
-                                    down: mouse_down,
-                                    up: event.clone(),
-                                });
+                        match phase {
+                            // Clear the pending mouse down during the capture phase,
+                            // so that it happens even if another event handler stops
+                            // propagation.
+                            DispatchPhase::Capture => {
+                                let mut pending_mouse_down = pending_mouse_down.borrow_mut();
+                                if pending_mouse_down.is_some() && hitbox.is_hovered(window) {
+                                    captured_mouse_down = pending_mouse_down.take();
+                                    window.refresh();
+                                } else if pending_mouse_down.is_some() {
+                                    // Clear the pending mouse down event (without firing click handlers)
+                                    // if the hitbox is not being hovered.
+                                    // This avoids dragging elements that changed their position
+                                    // immediately after being clicked.
+                                    // See https://github.com/zed-industries/zed/issues/24600 for more details
+                                    pending_mouse_down.take();
+                                    window.refresh();
+                                }
+                            }
+                            // Fire click handlers during the bubble phase.
+                            DispatchPhase::Bubble => {
+                                if let Some(mouse_down) = captured_mouse_down.take() {
+                                    let btn = mouse_down.button;
 
-                                match btn {
-                                    MouseButton::Left => {
-                                        for listener in &click_listeners {
-                                            listener(&mouse_click, window, cx);
+                                    let mouse_click = ClickEvent::Mouse(MouseClickEvent {
+                                        down: mouse_down,
+                                        up: event.clone(),
+                                    });
+
+                                    match btn {
+                                        MouseButton::Left => {
+                                            for listener in &click_listeners {
+                                                listener(&mouse_click, window, cx);
+                                            }
                                         }
-                                    }
-                                    _ => {
-                                        for listener in &aux_click_listeners {
-                                            listener(&mouse_click, window, cx);
+                                        _ => {
+                                            for listener in &aux_click_listeners {
+                                                listener(&mouse_click, window, cx);
+                                            }
                                         }
                                     }
                                 }
@@ -3665,58 +3909,37 @@ impl Interactivity {
                 });
             }
 
-            if !self.hover_listeners.is_empty() {
-                let was_hovered = element_state
-                    .hover_listener_state
-                    .get_or_insert_with(Default::default)
-                    .clone();
-                let has_mouse_down = element_state
-                    .pending_mouse_down
-                    .get_or_insert_with(Default::default)
-                    .clone();
-                let hover_listeners = self.hover_listeners.clone();
-                let hover_listener_state = was_hovered.clone();
-                let update_hover = move |is_hovered: bool, window: &mut Window, cx: &mut App| {
-                    let mut was_hovered = hover_listener_state.borrow_mut();
-                    if is_hovered != *was_hovered {
-                        *was_hovered = is_hovered;
-                        drop(was_hovered);
-                        for listener in &hover_listeners {
-                            listener(&is_hovered, window, cx);
+            if !self.hover_region_listeners.is_empty() {
+                let states = &mut element_state.hover_region_states;
+                states.resize_with(self.hover_region_listeners.len(), HoverRegionState::default);
+                for (listener, state) in self.hover_region_listeners.iter().zip(states) {
+                    let observe = listener.bind(state);
+                    let region_hitbox = hitbox.clone();
+                    let pending_mouse_down = element_state
+                        .pending_mouse_down
+                        .get_or_insert_with(Default::default)
+                        .clone();
+                    window.on_pointer_change(move |change, window, cx| {
+                        if disabled {
+                            return;
                         }
-                    }
-                };
 
-                if has_mouse_down.borrow().is_none() {
-                    let is_hovered = !cx.has_active_drag() && hitbox.is_hovered(window);
-                    if is_hovered != *was_hovered.borrow() {
-                        let update_hover = update_hover.clone();
-                        window.defer(cx, move |window, cx| {
-                            update_hover(is_hovered, window, cx);
-                        });
-                    }
+                        let layout_changed = change.cause == PointerChangeCause::Layout;
+                        if layout_changed && pending_mouse_down.borrow().is_some() {
+                            return;
+                        }
+                        let position = if cx.has_active_drag()
+                            || !layout_changed && pending_mouse_down.borrow().is_some()
+                        {
+                            None
+                        } else if change.position.is_some() && !region_hitbox.is_hovered(window) {
+                            None
+                        } else {
+                            change.position
+                        };
+                        observe(position, region_hitbox.bounds, window, cx);
+                    });
                 }
-
-                window.on_mouse_event({
-                    let update_hover = update_hover.clone();
-                    let hitbox = hitbox.clone();
-                    move |_: &MouseMoveEvent, phase, window, cx| {
-                        if phase == DispatchPhase::Bubble {
-                            let is_hovered = has_mouse_down.borrow().is_none()
-                                && !cx.has_active_drag()
-                                && hitbox.is_hovered(window);
-                            update_hover(is_hovered, window, cx);
-                        }
-                    }
-                });
-
-                // The pointer can leave the window without a final MouseMove, so also
-                // clear hover on MouseExited.
-                window.on_mouse_event(move |_: &MouseExitEvent, phase, window, cx| {
-                    if phase == DispatchPhase::Bubble {
-                        update_hover(false, window, cx);
-                    }
-                });
             }
 
             if let Some(tooltip_builder) = self.tooltip_builder.take() {
@@ -3803,6 +4026,10 @@ impl Interactivity {
     }
 
     fn paint_keyboard_listeners(&mut self, window: &mut Window, _cx: &mut App) {
+        if self.disabled {
+            return;
+        }
+
         let key_down_listeners = mem::take(&mut self.key_down_listeners);
         let key_up_listeners = mem::take(&mut self.key_up_listeners);
         let modifiers_changed_listeners = mem::take(&mut self.modifiers_changed_listeners);
@@ -4015,13 +4242,23 @@ impl Interactivity {
                 let can_drop_without_listener = self
                     .can_drop_predicate
                     .as_ref()
-                    .map(|predicate| predicate(drag.value.as_ref(), hitbox, window, cx))
+                    .map(|predicate| {
+                        if self.disabled {
+                            return false;
+                        }
+
+                        predicate(drag.value.as_ref(), hitbox, window, cx)
+                    })
                     .unwrap_or(true);
                 let relevant_drop_listener = match can_drop_without_listener {
                     false => None,
                     true => {
                         let mut iter = self.drop_listeners.iter();
                         iter.find(|(drop_state_type, listener)| {
+                            if self.disabled {
+                                return false;
+                            }
+
                             if *drop_state_type != drag_state_type {
                                 return false;
                             }
@@ -4077,6 +4314,12 @@ impl Interactivity {
             {
                 style.refine(active_style)
             }
+        }
+
+        if self.disabled
+            && let Some(disabled_style) = self.disabled_style.as_ref()
+        {
+            style.refine(disabled_style);
         }
 
         if let Some(element_state) = element_state {
@@ -4189,12 +4432,18 @@ impl Interactivity {
                 node.clear_live_atomic();
             }
         }
-        if !self.click_listeners.is_empty() {
-            node.add_action(accesskit::Action::Click);
-        }
         if self.tracked_focus_handle.is_some() || self.focusable {
             node.add_action(accesskit::Action::Focus);
         }
+
+        if self.disabled {
+            return;
+        }
+
+        if !self.click_listeners.is_empty() {
+            node.add_action(accesskit::Action::Click);
+        }
+
         for (action, _) in &self.a11y_action_listeners {
             node.add_action(*action);
         }
@@ -4208,7 +4457,7 @@ pub struct InteractiveElementState {
     pub(crate) focus_handle: Option<FocusHandle>,
     pub(crate) clicked_state: Option<Rc<RefCell<ElementClickedState>>>,
     pub(crate) hover_state: Option<Rc<RefCell<ElementHoverState>>>,
-    pub(crate) hover_listener_state: Option<Rc<RefCell<bool>>>,
+    pub(crate) hover_region_states: Vec<HoverRegionState>,
     pub(crate) pending_mouse_down: Option<Rc<RefCell<Option<MouseDownEvent>>>>,
     /// Set to the window's [`focus_generation`](crate::Window::focus_generation)
     /// when an Enter/Space keydown is received while this element is focused,
@@ -5212,7 +5461,7 @@ mod tests {
                             .absolute()
                             .size_full()
                             .invisible()
-                            .group_hover("hover-group", |style| style.visible())
+                            .group_hover_style("hover-group", |style| style.visible())
                             .child(canvas(
                                 |_, _, _| {},
                                 move |_, _, _, _| {
@@ -5227,7 +5476,7 @@ mod tests {
                             .top_0()
                             .left_0()
                             .size(px(10.))
-                            .group_hover("hover-group", |style| style.size(px(20.)))
+                            .group_hover_style("hover-group", |style| style.size(px(20.)))
                             .child(
                                 canvas(
                                     move |bounds, _, _| stateful_width.set(bounds.size.width),
@@ -5406,6 +5655,267 @@ mod tests {
         })
         .unwrap();
         assert_eq!(*hover_transitions.borrow(), [true]);
+    }
+
+    struct HoverRegionView {
+        events: Rc<RefCell<Vec<Option<&'static str>>>>,
+        projections: Rc<Cell<usize>>,
+    }
+
+    impl Render for HoverRegionView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let events = self.events.clone();
+            let projections = self.projections.clone();
+            div().size_full().child(
+                div()
+                    .id("hover-region-target")
+                    .ml(px(20.))
+                    .mt(px(20.))
+                    .size(px(40.))
+                    .on_hover_region(
+                        move |position, bounds| {
+                            projections.set(projections.get() + 1);
+                            let x = position.x - bounds.left();
+                            (x < px(15.))
+                                .then_some("left")
+                                .or_else(|| (x >= px(25.)).then_some("right"))
+                        },
+                        move |region, _, _| events.borrow_mut().push(*region),
+                    ),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn hover_region_transitions_once_and_stays_none_after_exit(cx: &mut TestAppContext) {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let projections = Rc::new(Cell::new(0));
+        let window = cx.add_window({
+            let events = events.clone();
+            let projections = projections.clone();
+            move |_, _| HoverRegionView {
+                events,
+                projections,
+            }
+        });
+        let any_window = AnyWindowHandle::from(window);
+
+        let mut expected = Vec::new();
+        for (x, transition) in [
+            (25., Some(Some("left"))),
+            (30., None),
+            (40., Some(None)), // The projector can decline while the element stays hovered.
+            (42., None),
+            (50., Some(Some("right"))),
+            (50., None),
+        ] {
+            cx.update_window(any_window, |_, window, cx| {
+                window.simulate_mouse_move(point(px(x), px(25.)), cx);
+                window.draw(cx).clear(cx);
+            })
+            .unwrap();
+            if let Some(transition) = transition {
+                expected.push(transition);
+            }
+            assert_eq!(*events.borrow(), expected, "x={x}");
+        }
+        let count = projections.get();
+        cx.update_window(any_window, |_, window, cx| {
+            window.dispatch_event(
+                // No final move: the window still holds the last inside position.
+                MouseExitEvent::default().to_platform_input(),
+                cx,
+            );
+            window.draw(cx).clear(cx);
+            window.dispatch_event(MouseExitEvent::default().to_platform_input(), cx);
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+
+        expected.push(None);
+        assert_eq!(*events.borrow(), expected);
+        assert_eq!(
+            projections.get(),
+            count,
+            "exit and subsequent draws must not run the projection"
+        );
+        cx.update_window(any_window, |_, window, cx| {
+            window.simulate_mouse_move(point(px(50.), px(25.)), cx);
+            window.simulate_mouse_move(point(px(60.), px(25.)), cx);
+            window.simulate_mouse_move(point(px(65.), px(25.)), cx);
+        })
+        .unwrap();
+        expected.extend([Some("right"), None]);
+        assert_eq!(
+            *events.borrow(),
+            expected,
+            "reentry and half-open element bounds"
+        );
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum HoverRegionEvent {
+        Number(Option<u8>),
+        Flag(Option<bool>),
+    }
+
+    struct MultipleHoverRegionsView {
+        events: Rc<RefCell<Vec<HoverRegionEvent>>>,
+    }
+
+    impl Render for MultipleHoverRegionsView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let events = self.events.clone();
+            let events_second = events.clone();
+            div()
+                .id("multiple-hover-regions")
+                .size(px(40.))
+                .on_hover_region(
+                    |position, _| (position.x < px(20.)).then_some(1u8),
+                    move |value, _, _| events.borrow_mut().push(HoverRegionEvent::Number(*value)),
+                )
+                .on_hover_region(
+                    |position, _| (position.x >= px(20.)).then_some(true),
+                    move |value, _, _| {
+                        // Keep this listener independently typed from the first one.
+                        events_second
+                            .borrow_mut()
+                            .push(HoverRegionEvent::Flag(*value));
+                    },
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn hover_regions_keep_independent_state_when_rebuilt(cx: &mut TestAppContext) {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let view = cx.add_window({
+            let events = events.clone();
+            move |_, _| MultipleHoverRegionsView { events }
+        });
+        let any_window = AnyWindowHandle::from(view);
+        cx.update_window(any_window, |_, window, cx| {
+            window.draw(cx).clear(cx);
+            window.simulate_mouse_move(point(px(5.), px(5.)), cx);
+            window.simulate_mouse_move(point(px(25.), px(5.)), cx);
+        })
+        .unwrap();
+        use HoverRegionEvent::{Flag, Number};
+        assert_eq!(
+            *events.borrow(),
+            [Number(Some(1)), Number(None), Flag(Some(true))]
+        );
+        for _ in 0..3 {
+            view.update(cx, |_, _, cx| cx.notify()).unwrap();
+            cx.update_window(any_window, |_, window, cx| window.draw(cx).clear(cx))
+                .unwrap();
+            assert_eq!(
+                *events.borrow(),
+                [Number(Some(1)), Number(None), Flag(Some(true))]
+            );
+        }
+        cx.update_window(any_window, |_, window, cx| {
+            window.simulate_mouse_move(point(px(5.), px(5.)), cx);
+            window.simulate_mouse_move(point(px(50.), px(5.)), cx);
+        })
+        .unwrap();
+        assert_eq!(
+            *events.borrow(),
+            [
+                Number(Some(1)),
+                Number(None),
+                Flag(Some(true)),
+                Number(Some(1)),
+                Flag(None),
+                Number(None)
+            ]
+        );
+    }
+
+    struct ChangingHoverRegionView {
+        enabled: bool,
+        alternate_type: bool,
+        events: Rc<RefCell<Vec<HoverRegionEvent>>>,
+    }
+
+    impl Render for ChangingHoverRegionView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let events = self.events.clone();
+            let target = div().id("changing-regions").size(px(40.));
+            if !self.enabled {
+                target
+            } else if self.alternate_type {
+                target.on_hover_region(
+                    |_, _| Some(true),
+                    move |value, _, _| events.borrow_mut().push(HoverRegionEvent::Flag(*value)),
+                )
+            } else {
+                target.on_hover_region(
+                    |_, _| Some(1u8),
+                    move |value, _, _| events.borrow_mut().push(HoverRegionEvent::Number(*value)),
+                )
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn hover_region_registration_replaces_types_and_discards_removed_state(
+        cx: &mut TestAppContext,
+    ) {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.add_window({
+            let events = events.clone();
+            move |_, _| ChangingHoverRegionView {
+                enabled: true,
+                alternate_type: false,
+                events,
+            }
+        });
+        let any_window = AnyWindowHandle::from(window);
+        cx.update_window(any_window, |_, window, cx| {
+            window.simulate_mouse_move(point(px(5.), px(5.)), cx);
+        })
+        .unwrap();
+        assert_eq!(*events.borrow(), [HoverRegionEvent::Number(Some(1))]);
+        window
+            .update(cx, |view, _, cx| {
+                view.alternate_type = true;
+                cx.notify();
+            })
+            .unwrap();
+        cx.update_window(any_window, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        assert_eq!(
+            *events.borrow(),
+            [
+                HoverRegionEvent::Number(Some(1)),
+                HoverRegionEvent::Flag(Some(true))
+            ]
+        );
+        window
+            .update(cx, |view, _, cx| {
+                view.enabled = false;
+                cx.notify();
+            })
+            .unwrap();
+        cx.update_window(any_window, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        window
+            .update(cx, |view, _, cx| {
+                view.enabled = true;
+                cx.notify();
+            })
+            .unwrap();
+        cx.update_window(any_window, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        assert_eq!(
+            *events.borrow(),
+            [
+                HoverRegionEvent::Number(Some(1)),
+                HoverRegionEvent::Flag(Some(true)),
+                HoverRegionEvent::Flag(Some(true))
+            ]
+        );
     }
 
     struct TestTooltipView;
@@ -5870,6 +6380,98 @@ mod tests {
         assert!(!node.is_disabled());
         assert!(!node.is_modal());
         assert!(!node.is_live_atomic());
+    }
+
+    struct DisabledCallbackProbe {
+        disabled: bool,
+        aria_disabled: bool,
+        callbacks: [usize; 4],
+        a11y_callbacks: usize,
+        prepaints: usize,
+    }
+
+    impl Render for DisabledCallbackProbe {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let probe = cx.weak_entity();
+
+            div()
+                .id("disabled-callback-probe")
+                .role(accesskit::Role::Button)
+                .aria_label("Disabled callback probe")
+                .size(px(100.))
+                .focusable()
+                .disabled(self.disabled)
+                .aria_disabled(self.aria_disabled)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view, _event, _window, _cx| view.callbacks[0] += 1),
+                )
+                .on_click(cx.listener(|view, _event, _window, _cx| view.callbacks[1] += 1))
+                .on_hover(cx.listener(|view, _hovered, _window, _cx| view.callbacks[2] += 1))
+                .on_key_down(cx.listener(|view, _event, _window, _cx| view.callbacks[3] += 1))
+                .on_a11y_action(accesskit::Action::Increment, move |_data, _window, cx| {
+                    probe
+                        .update(cx, |probe, _cx| probe.a11y_callbacks += 1)
+                        .unwrap();
+                })
+                .on_prepaint(cx.listener(|view, _info, _window, _cx| view.prepaints += 1))
+        }
+    }
+
+    #[gpui::test]
+    fn disabled_callbacks_are_independent_of_aria_disabled(cx: &mut TestAppContext) {
+        for (disabled, aria_disabled) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let (view, cx) = cx.add_window_view(move |_window, _cx| DisabledCallbackProbe {
+                disabled,
+                aria_disabled,
+                callbacks: [0; 4],
+                a11y_callbacks: 0,
+                prepaints: 0,
+            });
+
+            cx.update(|window, cx| {
+                window.set_a11y_forced(true);
+                window.draw(cx).clear(cx);
+            });
+            cx.simulate_mouse_move(point(px(150.), px(150.)), None, Default::default());
+            view.update(cx, |view, _cx| view.callbacks = [0; 4]);
+            cx.simulate_mouse_move(point(px(10.), px(10.)), None, Default::default());
+            cx.simulate_click(point(px(10.), px(10.)), Default::default());
+            cx.simulate_keystrokes("enter");
+
+            cx.update(|window, cx| {
+                let probe = view.read(cx);
+                assert_eq!(
+                    probe.callbacks.map(|count| count == 0),
+                    [disabled; 4],
+                    "disabled={disabled}, aria_disabled={aria_disabled}",
+                );
+                assert!(probe.prepaints > 0);
+
+                let (_node_id, node) = window
+                    .a11y_tree()
+                    .unwrap()
+                    .nodes
+                    .iter()
+                    .find(|(_id, node)| node.label() == Some("Disabled callback probe"))
+                    .unwrap();
+
+                assert_eq!(node.is_disabled(), aria_disabled);
+                assert_eq!(node.supports_action(accesskit::Action::Click), !disabled);
+                assert_eq!(
+                    node.supports_action(accesskit::Action::Increment),
+                    !disabled
+                );
+
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    window.perform_a11y_action(*_node_id, accesskit::Action::Increment, None, cx);
+                    assert_eq!(view.read(cx).a11y_callbacks, usize::from(!disabled));
+                }
+            });
+        }
     }
 
     /// Two focusable, clickable elements ("a" and "b") used to exercise the

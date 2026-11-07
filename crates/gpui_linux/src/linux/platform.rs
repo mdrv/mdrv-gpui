@@ -146,7 +146,13 @@ impl LinuxCommon {
             ]),
         );
         #[cfg(not(any(feature = "wayland", feature = "x11")))]
-        let text_system = Arc::new(gpui::NoopTextSystem::new());
+        // No windowing backend: skip the system font scan; hosts register
+        // what they need. (Upstream references a nonexistent
+        // `gpui::NoopTextSystem` here.)
+        let text_system = Arc::new(gpui_parley::ParleyTextSystem::new_with_system_font(
+            gpui_parley::SystemFonts::Skip,
+            "IBM Plex Sans",
+        ));
 
         let callbacks = PlatformHandlers::default();
 

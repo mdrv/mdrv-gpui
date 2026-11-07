@@ -3367,7 +3367,7 @@ dependencies = [
 
 [[package]]
 name = "mdrv-gpui"
-version = "0.270.1"
+version = "0.270.2"
 dependencies = [
  "accesskit",
  "accesskit_consumer 0.38.0",
@@ -3459,7 +3459,7 @@ dependencies = [
 
 [[package]]
 name = "mdrv-gpui-apple"
-version = "0.270.1"
+version = "0.270.2"
 dependencies = [
  "anyhow",
  "block",
@@ -3484,7 +3484,7 @@ dependencies = [
 
 [[package]]
 name = "mdrv-gpui-collections"
-version = "0.270.1"
+version = "0.270.2"
 dependencies = [
  "indexmap",
  "mdrv-gpui-util",
@@ -3493,7 +3493,7 @@ dependencies = [
 
 [[package]]
 name = "mdrv-gpui-derive-refineable"
-version = "0.270.1"
+version = "0.270.2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3502,7 +3502,7 @@ dependencies = [
 
 [[package]]
 name = "mdrv-gpui-elements"
-version = "0.270.1"
+version = "0.270.2"
 dependencies = [
  "derive_setters",
  "gpui-ce-fonts",
@@ -3516,7 +3516,7 @@ dependencies = [
 
 [[package]]
 name = "mdrv-gpui-linux"
-version = "0.270.1"
+version = "0.270.2"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -3563,7 +3563,7 @@ dependencies = [
 
 [[package]]
 name = "mdrv-gpui-macos"
-version = "0.270.1"
+version = "0.270.2"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -3616,7 +3616,7 @@ dependencies = [
 
 [[package]]
 name = "mdrv-gpui-macros"
-version = "0.270.1"
+version = "0.270.2"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -3626,7 +3626,7 @@ dependencies = [
 
 [[package]]
 name = "mdrv-gpui-media"
-version = "0.270.1"
+version = "0.270.2"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -3639,7 +3639,7 @@ dependencies = [
 
 [[package]]
 name = "mdrv-gpui-path"
-version = "0.270.1"
+version = "0.270.2"
 dependencies = [
  "anyhow",
  "dunce",
@@ -3650,7 +3650,7 @@ dependencies = [
 
 [[package]]
 name = "mdrv-gpui-platform"
-version = "0.270.1"
+version = "0.270.2"
 dependencies = [
  "console_error_panic_hook",
  "gpui-ce-fonts",
@@ -3665,14 +3665,14 @@ dependencies = [
 
 [[package]]
 name = "mdrv-gpui-refineable"
-version = "0.270.1"
+version = "0.270.2"
 dependencies = [
  "mdrv-gpui-derive-refineable",
 ]
 
 [[package]]
 name = "mdrv-gpui-render"
-version = "0.270.1"
+version = "0.270.2"
 dependencies = [
  "mdrv-gpui",
  "naga 24.0.0",
@@ -3684,7 +3684,7 @@ dependencies = [
 
 [[package]]
 name = "mdrv-gpui-scheduler"
-version = "0.270.1"
+version = "0.270.2"
 dependencies = [
  "async-task",
  "backtrace",
@@ -3699,7 +3699,7 @@ dependencies = [
 
 [[package]]
 name = "mdrv-gpui-shared-string"
-version = "0.270.1"
+version = "0.270.2"
 dependencies = [
  "schemars",
  "serde",
@@ -3708,7 +3708,7 @@ dependencies = [
 
 [[package]]
 name = "mdrv-gpui-sum-tree"
-version = "0.270.1"
+version = "0.270.2"
 dependencies = [
  "heapless",
  "log",
@@ -3720,7 +3720,7 @@ dependencies = [
 
 [[package]]
 name = "mdrv-gpui-tokio"
-version = "0.270.1"
+version = "0.270.2"
 dependencies = [
  "anyhow",
  "mdrv-gpui",
@@ -3730,7 +3730,7 @@ dependencies = [
 
 [[package]]
 name = "mdrv-gpui-util"
-version = "0.270.1"
+version = "0.270.2"
 dependencies = [
  "anyhow",
  "log",
@@ -3739,7 +3739,7 @@ dependencies = [
 
 [[package]]
 name = "mdrv-gpui-web"
-version = "0.270.1"
+version = "0.270.2"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -3763,7 +3763,7 @@ dependencies = [
 
 [[package]]
 name = "mdrv-gpui-wgpu"
-version = "0.270.1"
+version = "0.270.2"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3804,7 +3804,7 @@ dependencies = [
 
 [[package]]
 name = "mdrv-gpui-windows"
-version = "0.270.1"
+version = "0.270.2"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -3836,7 +3836,7 @@ dependencies = [
 
 [[package]]
 name = "mdrv-gpui-zed-util"
-version = "0.270.1"
+version = "0.270.2"
 dependencies = [
  "anyhow",
  "async-fs",

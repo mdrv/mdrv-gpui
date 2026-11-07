@@ -82,6 +82,7 @@ merge surface):
 - `crates/gpui/src/elements/div.rs` — `HoverListenerMode` no-op compat shim (touch-first platforms).
 - `crates/gpui_elements/examples/switch.rs` — crate-rename ident fix.
 - `crates/gpui_platform/tests/parley_render.rs` — crate-rename ident fix.
+- `crates/gpui_linux/src/linux/platform.rs` — no-windowing text-system fallback (upstream references a nonexistent `gpui::NoopTextSystem`; Parley with `SystemFonts::Skip` instead).
 - `crates/gpui_render/src/shaders/filters.rs` — render-scale/scene-space plumbing.
 - `crates/gpui_render/src/shaders/interface.rs` — `GlobalUniforms` gains `surface_size`.
 - `crates/gpui_render/src/shaders/paths.rs` — scene-space fragment coordinates.

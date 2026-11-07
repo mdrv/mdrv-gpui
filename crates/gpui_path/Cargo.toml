@@ -1,6 +1,6 @@
 [package]
 name = "mdrv-gpui-path"
-version = "0.270.1"
+version = "0.270.2"
 edition = "2024"
 license = "Apache-2.0"
 publish = true
